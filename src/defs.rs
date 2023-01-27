@@ -36,16 +36,19 @@ pub enum Exp {
     Inj(usize, Box<Exp>),
     Match(Box<Exp>, Box<[(Ident, Exp)]>),
     Fix(Box<(Ident, Exp)>),
+    Let(Box<[(Ident, Exp)]>, Box<Exp>)
 }
 
-
+#[macro_export]
 macro_rules! exp {
-    ($t:tt) => {serde_lexpr::from_value::<Exp>(&lexpr::sexp!($t)).unwrap()}
+    ($t:tt) => {serde_lexpr::from_value::<crate::defs::Exp>(&lexpr::sexp!($t)).unwrap()}
 }
 
+#[macro_export]
 macro_rules! ty {
-    ($t:tt) => {serde_lexpr::from_value::<Type>(&lexpr::sexp!($t)).unwrap()}
+    ($t:tt) => {serde_lexpr::from_value::<crate::defs::Type>(&lexpr::sexp!($t)).unwrap()}
 }
+
 
 pub use Exp::*;
 

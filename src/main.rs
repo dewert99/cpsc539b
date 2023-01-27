@@ -11,8 +11,8 @@ use ty_check::type_check;
 
 #[test]
 fn test() {
-    assert_eq!(type_check(&mut exp!((proj 0 (as (tuple (tuple)) (x (x)))))), Ok(&ty!((x))));
-    assert_eq!(type_check(&mut exp!((app (as (lambda "x" (var . "x")) (fun (x) (x))) (tuple)))), Ok(&ty!((x))));
+    assert_eq!(type_check(&exp!((proj 0 (as (tuple (tuple)) (x (x)))))), Ok(&ty!((x))));
+    assert_eq!(type_check(&exp!((app (as (lambda "x" (var . "x")) (fun (x) (x))) (tuple)))), Ok(&ty!((x))));
 }
 
 fn main () {

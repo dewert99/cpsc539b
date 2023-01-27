@@ -1,4 +1,3 @@
-use std::mem;
 use ahash::AHashMap;
 use crate::defs::*;
 use crate::tenv::SPHashMap;
@@ -6,21 +5,35 @@ use crate::ty_check::TypeError::Mismatch2;
 
 type Tenv<'a> = SPHashMap<Ident, &'a Type>;
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum TypeError<'a> {
     NotFunc(&'a Type),
     NotProd(&'a Type, usize),
     NotSum(&'a Type, usize),
     CantInfer,
-    Mismatch1{expected: &'a Type},
-    Mismatch2{actual: &'a Type, expected: &'a Type},
+    Mismatch1 { expected: &'a Type },
+    Mismatch2 { actual: &'a Type, expected: &'a Type },
     Unbound,
 }
 
 use TypeError::*;
 
+type Result<'a, T> = core::result::Result<T, (&'a Exp, TypeError<'a>)>;
 
-fn infer_type<'a>(exp: &'a Exp, tenv: &mut Tenv<'a>) -> Result<&'a Type, (&'a Exp, TypeError<'a>)> {
+fn handle_let<'a, T>(bindings: &'a [(Ident, Exp)], tenv: &mut Tenv<'a>, f: impl Fn(&mut Tenv<'a>) -> Result<'a, T>) -> Result<'a, T> {
+    match bindings {
+        [(id, exp), rest @ ..] => {
+            let ty = infer_type(exp, tenv)?;
+            handle_let(rest, &mut tenv.insert_sp(id.clone(), ty), f)
+        }
+        [] => {
+            f(tenv)
+        }
+    }
+}
+
+
+fn infer_type<'a>(exp: &'a Exp, tenv: &mut Tenv<'a>) -> Result<'a, &'a Type> {
     match exp {
         Var(x) => match tenv.get(x) {
             Some(v) => Ok(*v),
@@ -45,11 +58,14 @@ fn infer_type<'a>(exp: &'a Exp, tenv: &mut Tenv<'a>) -> Result<&'a Type, (&'a Ex
                 ty => Err((exp, NotProd(ty, *idx)))
             }
         }
+        Let(box bindings, box body) => {
+            handle_let(bindings, tenv, |tenv| infer_type(body, tenv))
+        }
         exp => Err((exp, CantInfer))
     }
 }
 
-fn check_type<'a>(exp: &'a Exp, tenv: &mut Tenv<'a>, ty: &'a Type) -> Result<(), (&'a Exp, TypeError<'a>)> {
+fn check_type<'a>(exp: &'a Exp, tenv: &mut Tenv<'a>, ty: &'a Type) -> Result<'a, ()> {
     match (exp, ty) {
         (Lambda(box (var, body)), Fun(box [input, output])) => {
             check_type(body, &mut tenv.insert_sp(var.clone(), input), output)
@@ -59,7 +75,7 @@ fn check_type<'a>(exp: &'a Exp, tenv: &mut Tenv<'a>, ty: &'a Type) -> Result<(),
             if actual == ty {
                 Ok(())
             } else {
-                Err((exp, Mismatch2 {actual, expected: ty}))
+                Err((exp, Mismatch2 { actual, expected: ty }))
             }
         }
         (Tuple(box exps), Prod(box tys)) if tys.len() == exps.len() => {
@@ -80,11 +96,14 @@ fn check_type<'a>(exp: &'a Exp, tenv: &mut Tenv<'a>, ty: &'a Type) -> Result<(),
         (Fix(box (var, body)), ty) => {
             check_type(body, &mut tenv.insert_sp(var.clone(), ty), ty)
         }
-        (exp, ty) => Err((exp, Mismatch1 {expected: ty}))
+        (Let(box bindings, box body), ty) => {
+            handle_let(bindings, tenv, |tenv| check_type(body, tenv, ty))
+        }
+        (exp, ty) => Err((exp, Mismatch1 { expected: ty }))
     }
 }
 
-pub fn type_check(exp: &Exp) -> Result<&Type, (&Exp, TypeError<'_>)> {
+pub fn type_check(exp: &Exp) -> Result<'_, &Type> {
     let mut tenv = Tenv::new(AHashMap::new());
     infer_type(exp, &mut tenv)
 }
