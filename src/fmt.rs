@@ -1,4 +1,4 @@
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Debug, Display, Formatter};
 use core::mem;
 use lexpr::{Cons, Value};
 use serde::Serialize;
@@ -36,12 +36,12 @@ pub fn to_value_better<T>(value: &T) -> Value
 
 impl Debug for Type {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", to_value_better(self))
+        Display::fmt(&to_value_better(self), f)
     }
 }
 
 impl Debug for Exp {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", to_value_better(self))
+        Display::fmt(&to_value_better(self), f)
     }
 }

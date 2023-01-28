@@ -1,4 +1,5 @@
 use std::hash::Hash;
+use std::mem;
 use std::ops::{Deref, DerefMut};
 use ahash::AHashMap;
 
@@ -58,6 +59,34 @@ impl<'a, K: Hash + Eq + Clone, V> SemiPersistent<AHashMap<K, V>> {
                     Some(val) => map.insert(key.clone(), val),
                 };
             },
+        }
+    }
+
+    pub fn remove_sp(
+        &mut self,
+        key: K,
+    ) -> Revert<'_, AHashMap<K, V>, impl FnMut(&mut AHashMap<K, V>)> {
+        let mut last_val = self.0.remove(&key);
+        Revert {
+            data: self,
+            revert: move |map| {
+                match last_val.take() {
+                    None => {},
+                    Some(val) => {map.insert(key.clone(), val);},
+                };
+            },
+        }
+    }
+
+    pub fn clear(
+        &mut self,
+    ) -> Revert<'_, AHashMap<K, V>, impl FnMut(&mut AHashMap<K, V>)> {
+        let mut last_val = mem::take(&mut self.0);
+        Revert {
+            data: self,
+            revert: move |map| {
+                *map = mem::take(&mut last_val)
+            }
         }
     }
 }
