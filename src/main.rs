@@ -29,11 +29,13 @@ fn main () {
             "check\n" => println!("{:?}", type_check(&exp)),
             "simpl_match\n" => resolve_never(simpl_match(&mut exp)),
             "simpl_proj\n" => resolve_never(simpl_proj(&mut exp)),
-            "simpl_app\n" => resolve_never(simpl_proj(&mut exp)),
+            "simpl_app\n" => resolve_never(simpl_app(&mut exp)),
             "simpl\n" => resolve_never(simpl(&mut exp)),
             "subst_let\n" => resolve_never(subst_let(&mut exp)),
             "erase\n" => resolve_never(erase(&mut exp)),
             "eval\n" => resolve_never(eval(&mut exp)),
+            "simpl_step\n" => resolve_step(simpl_step(&mut exp)),
+            "step\n" => resolve_step(step(&mut exp)),
             _ => match from_str(&buf) {
                 Ok(x) => exp = x,
                 Err(e) => eprintln!("{e:?}")
