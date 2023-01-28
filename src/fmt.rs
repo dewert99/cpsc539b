@@ -6,12 +6,6 @@ use crate::defs::{Exp, Type};
 
 pub fn fix_lexpr_value(v: &mut Value) {
     match v {
-        Value::String(_) => {
-            match mem::replace(v, Value::Nil) {
-                Value::String(s) => *v = Value::Symbol(s),
-                _ => unreachable!()
-            }
-        }
         Value::Cons(c) => {
             fix_lexpr_value(c.car_mut());
             fix_lexpr_value(c.cdr_mut());

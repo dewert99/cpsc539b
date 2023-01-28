@@ -2,6 +2,7 @@ use std::hash::Hash;
 use std::ops::{Deref, DerefMut};
 use ahash::AHashMap;
 
+#[derive(Default)]
 pub struct SemiPersistent<T>(T);
 
 impl<T> Deref for SemiPersistent<T> {
@@ -56,25 +57,6 @@ impl<'a, K: Hash + Eq + Clone, V> SemiPersistent<AHashMap<K, V>> {
                     None => map.remove(&key),
                     Some(val) => map.insert(key.clone(), val),
                 };
-            },
-        }
-    }
-
-    fn insert_many(
-        &mut self,
-        key_vals: impl IntoIterator<Item = (K, V)>,
-    ) -> Revert<'_, AHashMap<K, V>, impl FnMut(&mut AHashMap<K, V>)> {
-        let mut revert_vec: Vec<_> =
-            key_vals.into_iter().map(|(k, v)| (k.clone(), self.0.insert(k, v))).collect();
-        Revert {
-            data: self,
-            revert: move |map| {
-                revert_vec.drain(..).for_each(|(key, last_val)| {
-                    match last_val {
-                        None => map.remove(&key),
-                        Some(val) => map.insert(key, val),
-                    };
-                });
             },
         }
     }

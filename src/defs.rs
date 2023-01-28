@@ -18,7 +18,7 @@ pub enum Type {
 
 pub use Type::*;
 
-#[derive(Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Eq, PartialEq, Clone)]
 #[serde(rename_all = "kebab-case")]
 pub enum Exp {
     #[serde(alias = "λ")]
@@ -37,6 +37,12 @@ pub enum Exp {
     Match(Box<Exp>, Box<[(Ident, Exp)]>),
     Fix(Box<(Ident, Exp)>),
     Let(Box<[(Ident, Exp)]>, Box<Exp>)
+}
+
+impl Default for Exp {
+    fn default() -> Self {
+        Var(Ident::default())
+    }
 }
 
 #[macro_export]
