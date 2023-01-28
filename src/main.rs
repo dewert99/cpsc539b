@@ -17,7 +17,7 @@ use crate::defs::Exp;
 fn test() {
     assert_eq!(type_check(&exp!((proj 0 (as (tuple (tuple)) (x (x)))))), Ok(&ty!((x))));
     assert_eq!(type_check(&exp!((app (as (lambda "x" (var . "x")) (fun (x) (x))) (tuple)))), Ok(&ty!((x))));
-    exp!((lambda "x" ($ (var . "f") (lambda "v" ($ ($ (var . "x") (var . "x")) (var . "v"))))))
+    exp!((tuple))
 }
 
 fn main () {

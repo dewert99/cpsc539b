@@ -59,6 +59,15 @@ fn simpl_match_h<T>(exp: &mut Exp, stop: Result<(), T>, rec: &mut impl FnMut(boo
                     stop?;
                     rec(false, exp)
                 }
+                Ascribe(box (Inj(idx, box scrut), Sum(box tys))) if idx < &mut arms.len() && idx < &mut tys.len() => {
+                    let scrut = take(scrut);
+                    let (id, body) = take(&mut arms[*idx]);
+                    let ty = take(&mut tys[*idx]);
+                    let scrut = Ascribe(Box::new((scrut, ty)));
+                    *exp = Let(Box::new([(id, scrut)]), Box::new(body));
+                    stop?;
+                    rec(false, exp)
+                }
                 _ => rec(false, exp)
             }
         }
@@ -67,6 +76,7 @@ fn simpl_match_h<T>(exp: &mut Exp, stop: Result<(), T>, rec: &mut impl FnMut(boo
 }
 
 fn simpl_proj_h<T>(exp: &mut Exp, stop: Result<(), T>, rec: &mut impl FnMut(bool, &mut Exp) -> Result<(), T>) -> Result<(), T> {
+    dbg!(&exp);
     match exp {
         Proj(idx, box scrut) => {
             rec(true, scrut)?;
@@ -74,6 +84,12 @@ fn simpl_proj_h<T>(exp: &mut Exp, stop: Result<(), T>, rec: &mut impl FnMut(bool
                 Tuple(box exps) if idx < &mut exps.len() => {
                     let body = take(&mut exps[*idx]);
                     *exp = body;
+                    stop
+                }
+                Ascribe(box (Tuple(box exps), Prod(box tys))) if idx < &mut exps.len() && idx < &mut tys.len() => {
+                    let body = take(&mut exps[*idx]);
+                    let ty = take(&mut tys[*idx]);
+                    *exp = Ascribe(Box::new((body, ty)));
                     stop
                 }
                 _ => Ok(())
@@ -96,6 +112,16 @@ fn simpl_app_h<T>(exp: &mut Exp, stop: Result<(), T>, rec: &mut impl FnMut(bool,
                     stop?;
                     rec(false, exp)
                 }
+                Ascribe(box (Lambda(box binding), Fun(box ty))) => {
+                    let (id, body) = take(binding);
+                    let [arg_ty, res_ty] = take(ty);
+                    let arg = take(arg);
+                    let arg = Ascribe(Box::new((arg, arg_ty)));
+                    let body = Ascribe(Box::new((body, res_ty)));
+                    *exp = Let(Box::new([(id, arg)]), Box::new(body));
+                    stop?;
+                    rec(false, exp)
+                }
                 _ => Ok(())
             }
         }
@@ -113,10 +139,21 @@ fn erase_h<T>(exp: &mut Exp, rec: &mut impl FnMut(bool, &mut Exp) -> Result<(), 
     }
 }
 
+fn simpl_ascribe_h<T>(exp: &mut Exp, stop: Result<(), T>, rec: &mut impl FnMut(bool, &mut Exp) -> Result<(), T>) -> Result<(), T> {
+    match exp {
+        Ascribe(box (expi @ Ascribe(_), _)) => {
+            *exp = take(expi);
+            stop?;
+            rec(true, exp)
+        }
+        _ => rec(false, exp)
+    }
+}
+
 
 type Env<'a> = (&'a mut SPHashMap<Ident, Exp>, &'a mut SPHashMap<Ident, ()>);
 
-fn subst_let(bindings: &mut [(Ident, Exp)], body: &mut Exp,  already_done: &mut bool, (env1, env2): Env<'_>) -> () {
+fn subst_let(bindings: &mut [(Ident, Exp)], body: &mut Exp, already_done: &mut bool, (env1, env2): Env<'_>) -> () {
     match bindings {
         [(id, exp), rest @ ..] => {
             subst_let(rest, exp, already_done, (env1, &mut env2.remove_sp(id.clone())))
@@ -155,7 +192,7 @@ fn handle_let<T, U>(do_bindings: bool, bindings: &mut [(Ident, Exp)], body: &mut
             if do_bindings {
                 retry(exp, (env1, env2))?;
             }
-            let env = (&mut* env1.insert_sp(id.clone(), exp.clone()), &mut* env2.insert_sp(id.clone(), ()));
+            let env = (&mut *env1.insert_sp(id.clone(), exp.clone()), &mut *env2.insert_sp(id.clone(), ()));
             handle_let(do_bindings, rest, body, env, retry)
         }
         [] => {
@@ -175,17 +212,21 @@ fn eval_h<T: Copy>(exp: &mut Exp, mut env: Env<'_>, stop: Result<(), T>) -> Resu
         App(box [fun, arg]) => {
             eval_h(arg, (&mut *env.0, &mut env.1.clear()), stop)?;
             eval_h(fun, (&mut *env.0, &mut env.1.clear()), stop)?;
-            simpl_app_h(exp, stop, &mut |_,_| Ok(()))?;
+            simpl_app_h(exp, stop, &mut |_, _| Ok(()))?;
             do_bindings = false;
         }
         Match(box scrut, _) => {
             eval_h(scrut, (&mut *env.0, &mut *env.1), stop)?;
-            simpl_match_h(exp, stop, &mut |_,_| Ok(()))?;
+            simpl_match_h(exp, stop, &mut |_, _| Ok(()))?;
             do_bindings = false;
         }
-        Proj(_, box exp) => {
-            eval_h(exp, (&mut *env.0, &mut *env.1), stop)?;
-            return simpl_proj_h(exp, stop, &mut |_,_| Ok(()));
+        Proj(_, box scrut) => {
+            eval_h(scrut, (&mut *env.0, &mut *env.1), stop)?;
+            return simpl_proj_h(exp, stop, &mut |_, _| Ok(()));
+        }
+        Ascribe(box (scrut, _)) => {
+            eval_h(scrut, (&mut *env.0, &mut *env.1), stop)?;
+            return simpl_ascribe_h(exp, stop, &mut |_, _| Ok(()));
         }
         _ => {}
     }
@@ -230,7 +271,8 @@ pub fn resolve_step(r: Result<(), ()>) {
 fn simpl_h<T: Copy>(exp: &mut Exp, stop: Result<(), T>, rec: &mut impl FnMut(bool, &mut Exp) -> Result<(), T>) -> Result<(), T> {
     simpl_match_h(exp, stop, &mut |b, exp| ite!(b, rec(true, exp),
         simpl_proj_h(exp, stop, &mut |b, exp| ite!(b, rec(true, exp),
-            simpl_app_h(exp, stop, rec)))))
+            simpl_ascribe_h(exp, stop, &mut |b, exp| ite!(b, rec(true, exp),
+                simpl_app_h(exp, stop, rec)))))))
 }
 
 pub fn erase(exp: &mut Exp) -> Result<(), Never> {
@@ -308,3 +350,4 @@ pub fn collapse_lets(exp: &mut Exp) {
 //(lambda "x" ($ (var . "f") (lambda "v" ($ ($ (var . "x") (var . "x")) (var . "v")))))
 //(lambda "f" ($ (lambda "x" ($ (var . "f") (lambda "v" ($ ($ (var . "x") (var . "x")) (var . "v"))))) (lambda "x" ($ (var . "f") (lambda "v" ($ ($ (var . "x") (var . "x")) (var . "v")))))))
 //(lambda "r" (lambda "x" ($ (var . "r") (tuple (var . "x")))))
+//(let (("x" (as (tuple (tuple) (tuple (inj 1 (tuple)))) (x (x) (x (+ (+) (x)))))))   (as (match (proj 0 (proj 1 (var . "x"))) (("x" (tuple)) ("x" (var . "x"))) ) (x)) )

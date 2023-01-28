@@ -15,6 +15,12 @@ pub enum Type {
     Fun(Box<[Type; 2]>),
 }
 
+impl Default for Type {
+    fn default() -> Self {
+        Prod(Box::new([]))
+    }
+}
+
 
 pub use Type::*;
 
