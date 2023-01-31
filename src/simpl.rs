@@ -1,7 +1,7 @@
 use std::mem;
 use std::mem::take;
 use crate::defs::*;
-use crate::tenv::SPHashMap;
+use crate::semi_persistent::SPHashMap;
 
 
 fn try_recur<T>(exp: &mut Exp, rec: &mut impl FnMut(&mut Exp) -> Result<(), T>) -> Result<(), T> {
@@ -350,4 +350,4 @@ pub fn collapse_lets(exp: &mut Exp) {
 //(lambda "x" ($ (var . "f") (lambda "v" ($ ($ (var . "x") (var . "x")) (var . "v")))))
 //(lambda "f" ($ (lambda "x" ($ (var . "f") (lambda "v" ($ ($ (var . "x") (var . "x")) (var . "v"))))) (lambda "x" ($ (var . "f") (lambda "v" ($ ($ (var . "x") (var . "x")) (var . "v")))))))
 //(lambda "r" (lambda "x" ($ (var . "r") (tuple (var . "x")))))
-//(let (("x" (as (tuple (tuple) (tuple (inj 1 (tuple)))) (x (x) (x (+ (+) (x)))))))   (as (match (proj 0 (proj 1 (var . "x"))) (("x" (tuple)) ("x" (var . "x"))) ) (x)) )
+//(let (("x" (as (tuple (tuple) (tuple (inj 1 (tuple)))) (x (x) (x (+ (+) (x)))))))  (as (match (proj 0 (proj 1 (var . "x"))) (("x" (tuple)) ("x" (var . "x"))) ) (x)) )

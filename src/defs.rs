@@ -21,7 +21,6 @@ impl Default for Type {
     }
 }
 
-
 pub use Type::*;
 
 #[derive(Serialize, Deserialize, Eq, PartialEq, Clone)]
@@ -60,7 +59,6 @@ macro_rules! exp {
 macro_rules! ty {
     ($t:tt) => {serde_lexpr::from_value::<crate::defs::Type>(&lexpr::sexp!($t)).unwrap()}
 }
-
 
 pub use Exp::*;
 

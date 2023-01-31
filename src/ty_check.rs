@@ -1,7 +1,5 @@
-use ahash::AHashMap;
 use crate::defs::*;
-use crate::tenv::SPHashMap;
-use crate::ty_check::TypeError::Mismatch2;
+use crate::semi_persistent::SPHashMap;
 
 type Tenv<'a> = SPHashMap<Ident, &'a Type>;
 
@@ -67,9 +65,7 @@ fn infer_type<'a>(exp: &'a Exp, tenv: &mut Tenv<'a>) -> Result<'a, &'a Type> {
 
 fn check_type<'a>(exp: &'a Exp, tenv: &mut Tenv<'a>, ty: &'a Type) -> Result<'a, ()> {
     match (exp, ty) {
-        (Lambda(box (var, body)), Fun(box [input, output])) => {
-            check_type(body, &mut tenv.insert_sp(var.clone(), input), output)
-        }
+        // CheckInfer
         (Var(_) | App(_) | Ascribe(_) | Proj(..), ty) => {
             let actual = infer_type(exp, tenv)?;
             if actual == ty {
@@ -77,6 +73,9 @@ fn check_type<'a>(exp: &'a Exp, tenv: &mut Tenv<'a>, ty: &'a Type) -> Result<'a,
             } else {
                 Err((exp, Mismatch2 { actual, expected: ty }))
             }
+        }
+        (Lambda(box (var, body)), Fun(box [input, output])) => {
+            check_type(body, &mut tenv.insert_sp(var.clone(), input), output)
         }
         (Tuple(box exps), Prod(box tys)) if tys.len() == exps.len() => {
             exps.iter().zip(tys.iter()).try_for_each(|(exp, ty)| check_type(exp, tenv, ty))
@@ -104,6 +103,6 @@ fn check_type<'a>(exp: &'a Exp, tenv: &mut Tenv<'a>, ty: &'a Type) -> Result<'a,
 }
 
 pub fn type_check(exp: &Exp) -> Result<'_, &Type> {
-    let mut tenv = Tenv::new(AHashMap::new());
+    let mut tenv = Tenv::default();
     infer_type(exp, &mut tenv)
 }

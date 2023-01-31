@@ -2,7 +2,7 @@
 
 use serde_lexpr::from_str;
 
-mod tenv;
+mod semi_persistent;
 mod fmt;
 mod defs;
 mod ty_check;

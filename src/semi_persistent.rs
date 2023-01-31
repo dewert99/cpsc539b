@@ -4,6 +4,8 @@ use std::ops::{Deref, DerefMut};
 use ahash::AHashMap;
 
 #[derive(Default)]
+/// Wrapper for semi persistent data structure
+/// Methods mutating inner type return a `Revert` handle which reverts the changes when dropped
 pub struct SemiPersistent<T>(T);
 
 impl<T> Deref for SemiPersistent<T> {
@@ -44,7 +46,9 @@ impl<'a, T, F: FnMut(&mut T)> Drop for Revert<'a, T, F> {
     }
 }
 
-impl<'a, K: Hash + Eq + Clone, V> SemiPersistent<AHashMap<K, V>> {
+pub type SPHashMap<K, V> = SemiPersistent<AHashMap<K, V>>;
+
+impl<'a, K: Hash + Eq + Clone, V> SPHashMap<K, V> {
     pub fn insert_sp(
         &mut self,
         key: K,
@@ -90,5 +94,3 @@ impl<'a, K: Hash + Eq + Clone, V> SemiPersistent<AHashMap<K, V>> {
         }
     }
 }
-
-pub type SPHashMap<K, V> = SemiPersistent<AHashMap<K, V>>;
