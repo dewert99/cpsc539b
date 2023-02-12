@@ -28,7 +28,7 @@ fn try_recur<T>(exp: &mut Exp, rec: &mut impl FnMut(&mut Exp) -> Result<(), T>) 
     }
 }
 
-// similar to try_recur but it doesn't step into bindings so it's safer for capture avoiding
+// similar to try_recur but it doesn't step into bindings
 fn try_recur2<T>(exp: &mut Exp, rec: &mut impl FnMut(&mut Exp) -> Result<(), T>) -> Result<(), T> {
     match exp {
         Lambda(_) | Var(_) | Fix(_) | Let(..) => Ok(()),
@@ -47,7 +47,7 @@ fn try_recur2<T>(exp: &mut Exp, rec: &mut impl FnMut(&mut Exp) -> Result<(), T>)
 #[derive(Copy, Clone)]
 pub enum Never {}
 
-fn simpl_match_h<T>(exp: &mut Exp, stop: Result<(), T>, rec: &mut impl FnMut(bool, &mut Exp) -> Result<(), T>) -> Result<(), T> {
+fn simpl_match_h<T>(exp: &mut Exp, stop: Result<(), T>, defs: &TypeDefs, rec: &mut impl FnMut(bool, &mut Exp) -> Result<(), T>) -> Result<(), T> {
     match exp {
         Match(box scrut, box arms) => {
             rec(true, scrut)?;
@@ -59,14 +59,17 @@ fn simpl_match_h<T>(exp: &mut Exp, stop: Result<(), T>, rec: &mut impl FnMut(boo
                     stop?;
                     rec(false, exp)
                 }
-                Ascribe(box (Inj(idx, box scrut), Sum(box tys))) if idx < &mut arms.len() && idx < &mut tys.len() => {
-                    let scrut = take(scrut);
-                    let (id, body) = take(&mut arms[*idx]);
-                    let ty = take(&mut tys[*idx]);
-                    let scrut = Ascribe(Box::new((scrut, ty)));
-                    *exp = Let(Box::new([(id, scrut)]), Box::new(body));
-                    stop?;
-                    rec(false, exp)
+                Ascribe(box (Inj(idx, box scrut), ty)) => match defs.resolve(ty) {
+                    Sum(box tys) if idx < &mut arms.len() && idx < &mut tys.len() => {
+                        let scrut = take(scrut);
+                        let (id, body) = take(&mut arms[*idx]);
+                        let ty = tys[*idx].clone();
+                        let scrut = Ascribe(Box::new((scrut, ty)));
+                        *exp = Let(Box::new([(id, scrut)]), Box::new(body));
+                        stop?;
+                        rec(false, exp)
+                    }
+                    _ => rec(false, exp)
                 }
                 _ => rec(false, exp)
             }
@@ -75,8 +78,7 @@ fn simpl_match_h<T>(exp: &mut Exp, stop: Result<(), T>, rec: &mut impl FnMut(boo
     }
 }
 
-fn simpl_proj_h<T>(exp: &mut Exp, stop: Result<(), T>, rec: &mut impl FnMut(bool, &mut Exp) -> Result<(), T>) -> Result<(), T> {
-    dbg!(&exp);
+fn simpl_proj_h<T>(exp: &mut Exp, stop: Result<(), T>, defs: &TypeDefs, rec: &mut impl FnMut(bool, &mut Exp) -> Result<(), T>) -> Result<(), T> {
     match exp {
         Proj(idx, box scrut) => {
             rec(true, scrut)?;
@@ -86,11 +88,14 @@ fn simpl_proj_h<T>(exp: &mut Exp, stop: Result<(), T>, rec: &mut impl FnMut(bool
                     *exp = body;
                     stop
                 }
-                Ascribe(box (Tuple(box exps), Prod(box tys))) if idx < &mut exps.len() && idx < &mut tys.len() => {
-                    let body = take(&mut exps[*idx]);
-                    let ty = take(&mut tys[*idx]);
-                    *exp = Ascribe(Box::new((body, ty)));
-                    stop
+                Ascribe(box (Tuple(box exps), ty)) => match defs.resolve(ty) {
+                    Prod(box tys) if idx < &mut exps.len() && idx < &mut tys.len() => {
+                        let body = take(&mut exps[*idx]);
+                        let ty = tys[*idx].clone();
+                        *exp = Ascribe(Box::new((body, ty)));
+                        stop
+                    }
+                    _ => Ok(())
                 }
                 _ => Ok(())
             }
@@ -99,7 +104,7 @@ fn simpl_proj_h<T>(exp: &mut Exp, stop: Result<(), T>, rec: &mut impl FnMut(bool
     }
 }
 
-fn simpl_app_h<T>(exp: &mut Exp, stop: Result<(), T>, rec: &mut impl FnMut(bool, &mut Exp) -> Result<(), T>) -> Result<(), T> {
+fn simpl_app_h<T>(exp: &mut Exp, stop: Result<(), T>, defs: &TypeDefs, rec: &mut impl FnMut(bool, &mut Exp) -> Result<(), T>) -> Result<(), T> {
     match exp {
         App(box [f, arg]) => {
             rec(true, arg)?;
@@ -112,15 +117,18 @@ fn simpl_app_h<T>(exp: &mut Exp, stop: Result<(), T>, rec: &mut impl FnMut(bool,
                     stop?;
                     rec(false, exp)
                 }
-                Ascribe(box (Lambda(box binding), Fun(box ty))) => {
-                    let (id, body) = take(binding);
-                    let [arg_ty, res_ty] = take(ty);
-                    let arg = take(arg);
-                    let arg = Ascribe(Box::new((arg, arg_ty)));
-                    let body = Ascribe(Box::new((body, res_ty)));
-                    *exp = Let(Box::new([(id, arg)]), Box::new(body));
-                    stop?;
-                    rec(false, exp)
+                Ascribe(box (Lambda(box binding), ty)) => match defs.resolve(ty) {
+                    Fun(box ty) => {
+                        let (id, body) = take(binding);
+                        let [arg_ty, res_ty] = ty.clone();
+                        let arg = take(arg);
+                        let arg = Ascribe(Box::new((arg, arg_ty)));
+                        let body = Ascribe(Box::new((body, res_ty)));
+                        *exp = Let(Box::new([(id, arg)]), Box::new(body));
+                        stop?;
+                        rec(false, exp)
+                    }
+                    _ => Ok(())
                 }
                 _ => Ok(())
             }
@@ -206,26 +214,26 @@ macro_rules! ite {
 }
 
 
-fn eval_h<T: Copy>(exp: &mut Exp, mut env: Env<'_>, stop: Result<(), T>) -> Result<(), T> {
+fn eval_h<T: Copy>(exp: &mut Exp, mut env: Env<'_>, stop: Result<(), T>, defs: &TypeDefs) -> Result<(), T> {
     let mut do_bindings = true;
     match exp {
         App(box [fun, arg]) => {
-            eval_h(arg, (&mut *env.0, &mut env.1.clear()), stop)?;
-            eval_h(fun, (&mut *env.0, &mut env.1.clear()), stop)?;
-            simpl_app_h(exp, stop, &mut |_, _| Ok(()))?;
+            eval_h(arg, (&mut *env.0, &mut env.1.clear()), stop, defs)?;
+            eval_h(fun, (&mut *env.0, &mut env.1.clear()), stop, defs)?;
+            simpl_app_h(exp, stop, defs,&mut |_, _| Ok(()))?;
             do_bindings = false;
         }
         Match(box scrut, _) => {
-            eval_h(scrut, (&mut *env.0, &mut *env.1), stop)?;
-            simpl_match_h(exp, stop, &mut |_, _| Ok(()))?;
+            eval_h(scrut, (&mut *env.0, &mut *env.1), stop, defs)?;
+            simpl_match_h(exp, stop, defs,&mut |_, _| Ok(()))?;
             do_bindings = false;
         }
         Proj(_, box scrut) => {
-            eval_h(scrut, (&mut *env.0, &mut *env.1), stop)?;
-            return simpl_proj_h(exp, stop, &mut |_, _| Ok(()));
+            eval_h(scrut, (&mut *env.0, &mut *env.1), stop, defs)?;
+            return simpl_proj_h(exp, stop, defs,&mut |_, _| Ok(()));
         }
         Ascribe(box (scrut, _)) => {
-            eval_h(scrut, (&mut *env.0, &mut *env.1), stop)?;
+            eval_h(scrut, (&mut *env.0, &mut *env.1), stop, defs)?;
             return simpl_ascribe_h(exp, stop, &mut |_, _| Ok(()));
         }
         _ => {}
@@ -241,7 +249,7 @@ fn eval_h<T: Copy>(exp: &mut Exp, mut env: Env<'_>, stop: Result<(), T>) -> Resu
             }
         }
         Let(box bindings, body) => {
-            handle_let(do_bindings, bindings, body, env, &mut |exp, env| eval_h(exp, env, stop))?;
+            handle_let(do_bindings, bindings, body, env, &mut |exp, env| eval_h(exp, env, stop, defs))?;
             *exp = take(body);
             stop
         }
@@ -250,7 +258,7 @@ fn eval_h<T: Copy>(exp: &mut Exp, mut env: Env<'_>, stop: Result<(), T>) -> Resu
             subst(exp, &mut already_done, env);
             ite!(already_done, Ok(()), stop)
         }
-        _ => try_recur2(exp, &mut |exp| eval_h(exp, (&mut env.0, &mut env.1), stop))
+        _ => try_recur2(exp, &mut |exp| eval_h(exp, (&mut env.0, &mut env.1), stop, defs))
     }
 }
 
@@ -268,11 +276,11 @@ pub fn resolve_step(r: Result<(), ()>) {
     }
 }
 
-fn simpl_h<T: Copy>(exp: &mut Exp, stop: Result<(), T>, rec: &mut impl FnMut(bool, &mut Exp) -> Result<(), T>) -> Result<(), T> {
-    simpl_match_h(exp, stop, &mut |b, exp| ite!(b, rec(true, exp),
-        simpl_proj_h(exp, stop, &mut |b, exp| ite!(b, rec(true, exp),
+fn simpl_h<T: Copy>(exp: &mut Exp, stop: Result<(), T>, defs: &TypeDefs, rec: &mut impl FnMut(bool, &mut Exp) -> Result<(), T>) -> Result<(), T> {
+    simpl_match_h(exp, stop, defs, &mut |b, exp| ite!(b, rec(true, exp),
+        simpl_proj_h(exp, stop, defs, &mut |b, exp| ite!(b, rec(true, exp),
             simpl_ascribe_h(exp, stop, &mut |b, exp| ite!(b, rec(true, exp),
-                simpl_app_h(exp, stop, rec)))))))
+                simpl_app_h(exp, stop, defs, rec)))))))
 }
 
 pub fn erase(exp: &mut Exp) -> Result<(), Never> {
@@ -280,44 +288,62 @@ pub fn erase(exp: &mut Exp) -> Result<(), Never> {
         try_recur(exp, &mut erase)))
 }
 
-pub fn simpl_match(exp: &mut Exp) -> Result<(), Never> {
-    simpl_match_h(exp, Ok(()), &mut |b, exp| ite!(b, simpl_match(exp),
-        try_recur(exp, &mut simpl_match)))
+pub fn simpl_match(exp: &mut Exp, defs: &TypeDefs) -> Result<(), Never> {
+    simpl_match_h(exp, Ok(()), defs,&mut |b, exp| ite!(b, simpl_match(exp, defs),
+        try_recur(exp, &mut |exp| simpl_match(exp, defs))))
 }
 
-pub fn simpl_proj(exp: &mut Exp) -> Result<(), Never> {
-    simpl_match_h(exp, Ok(()), &mut |b, exp| ite!(b, simpl_proj(exp),
-        try_recur(exp, &mut simpl_proj)))
+pub fn simpl_proj(exp: &mut Exp, defs: &TypeDefs) -> Result<(), Never> {
+    simpl_match_h(exp, Ok(()), defs,&mut |b, exp| ite!(b, simpl_proj(exp, defs),
+        try_recur(exp, &mut |exp| simpl_proj(exp, defs))))
 }
 
-pub fn simpl_app(exp: &mut Exp) -> Result<(), Never> {
-    simpl_app_h(exp, Ok(()), &mut |b, exp| ite!(b, simpl_proj(exp),
-        try_recur(exp, &mut simpl_proj)))
+pub fn simpl_app(exp: &mut Exp, defs: &TypeDefs) -> Result<(), Never> {
+    simpl_app_h(exp, Ok(()), defs,&mut |b, exp| ite!(b, simpl_app(exp, defs),
+        try_recur(exp, &mut |exp| simpl_app(exp, defs))))
 }
 
-pub fn simpl(exp: &mut Exp) -> Result<(), Never> {
-    simpl_h(exp, Ok(()), &mut |b, exp| ite!(b, simpl(exp),
-        try_recur(exp, &mut simpl)))
+pub fn simpl(exp: &mut Exp, defs: &TypeDefs) -> Result<(), Never> {
+    simpl_h(exp, Ok(()), defs,&mut |b, exp| ite!(b, simpl(exp, defs),
+        try_recur(exp, &mut |exp| simpl(exp, defs))))
 }
 
-pub fn simpl_step(exp: &mut Exp) -> Result<(), ()> {
-    simpl_h(exp, Err(()), &mut |b, exp| ite!(b, simpl_step(exp),
-        try_recur(exp, &mut simpl_step)))
+pub fn simpl_step(exp: &mut Exp, defs: &TypeDefs) -> Result<(), ()> {
+    simpl_h(exp, Err(()), defs, &mut |b, exp| ite!(b, simpl_step(exp, defs),
+        try_recur(exp, &mut |exp| simpl_step(exp, defs))))
 }
 
 
-pub fn eval(exp: &mut Exp) -> Result<(), Never> {
+pub fn eval(exp: &mut Exp, defs: &TypeDefs) -> Result<(), Never> {
     let (mut x, mut y) = Default::default();
-    eval_h(exp, (&mut x, &mut y), Ok(()))
+    eval_h(exp, (&mut x, &mut y), Ok(()), defs)
 }
 
-pub fn step(exp: &mut Exp) -> Result<(), ()> {
+pub fn step(exp: &mut Exp, defs: &TypeDefs) -> Result<(), ()> {
     let (mut x, mut y) = Default::default();
-    eval_h(exp, (&mut x, &mut y), Err(()))
+    eval_h(exp, (&mut x, &mut y), Err(()), defs)
 }
 
 pub fn collapse_lets(exp: &mut Exp) {
     fn collapse_lets_h(exp: &mut Exp, past: Option<&mut Vec<(Ident, Exp)>>) {
+        match exp {
+            Ascribe(box (l@Let(_, _), _)) => {
+                let mut let_expr = take(l);
+                let mut ascribe_expr = take(exp);
+                match &mut let_expr {
+                    Let(_, box body) => {
+                        match &mut ascribe_expr {
+                            Ascribe(box (new_body, _)) => *new_body = take(body),
+                            _ => unreachable!()
+                        };
+                        *body = ascribe_expr
+                    },
+                    _ => unreachable!()
+                };
+                *exp = let_expr;
+            }
+            _ => {}
+        }
         match exp {
             Let(bindings_ref, box body) => {
                 let bindings = mem::replace(bindings_ref, Box::new([]));
@@ -351,3 +377,4 @@ pub fn collapse_lets(exp: &mut Exp) {
 //(lambda "f" ($ (lambda "x" ($ (var . "f") (lambda "v" ($ ($ (var . "x") (var . "x")) (var . "v"))))) (lambda "x" ($ (var . "f") (lambda "v" ($ ($ (var . "x") (var . "x")) (var . "v")))))))
 //(lambda "r" (lambda "x" ($ (var . "r") (tuple (var . "x")))))
 //(let (("x" (as (tuple (tuple) (tuple (inj 1 (tuple)))) (x (x) (x (+ (+) (x)))))))  (as (match (proj 0 (proj 1 (var . "x"))) (("x" (tuple)) ("x" (var . "x"))) ) (x)) )
+//($ (as (lambda "x" ($ (var . "x") (var . "x"))) (def . "Omega")) (lambda "x" ($ (var . "x") (var . "x"))))
