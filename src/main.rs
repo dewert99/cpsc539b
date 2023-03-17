@@ -1,48 +1,60 @@
 #![feature(box_patterns)]
+#![feature(assert_matches)]
 
-use serde_lexpr::from_str;
-
-mod semi_persistent;
-mod fmt;
+mod anf;
+mod ctxt;
 mod defs;
+mod error_reporting;
 mod ty_check;
-mod simpl;
+mod util;
 
-use ty_check::type_check;
-use simpl::*;
-use crate::defs::{Exp, TypeDefs};
+use std::assert_matches::assert_matches;
+use crate::ctxt::{make_context, make_tcx};
+use defs::Exp;
+use serde_lexpr::from_str;
+use ty_check::TypeError::*;
 
 
-#[test]
-fn test() {
-    assert_eq!(type_check(&exp!((proj 0 (as (tuple (tuple)) (x (x)))))), Ok(&ty!((x))));
-    assert_eq!(type_check(&exp!((app (as (lambda "x" (var . "x")) (fun (x) (x))) (tuple)))), Ok(&ty!((x))));
-    exp!((tuple))
+macro_rules! test_ty_check_result {
+    ($name:ident, $t:tt, $expect:pat) => {
+        #[test]
+        fn $name() {
+            let mut exp = exp!($t);
+            anf::anf_translate(&mut exp);
+            let ctx = make_context();
+            let mut tcx = make_tcx(&ctx);
+            let res = ty_check::infer_type(dbg!(&exp), &mut tcx);
+            assert_matches!(res, $expect)
+        }
+    };
 }
 
-fn main () {
+macro_rules! test_ty_check {
+    ($name:ident, $t:tt) => {
+        test_ty_check_result!{$name, $t, Ok(_)}
+    };
+}
+
+test_ty_check!{test1, (as ("add" 1) (-> "y" (: int #t) (: int (<= "y" res))))}
+test_ty_check_result!{test2, (as ("add" ("add" 1 1)) (-> "y" (: int #t) (: int (<= res "y")))), Err(SubType{..})}
+test_ty_check!{test3, (as (λ ("f" "x") ("f" ("f" "x"))) (-> "f" (-> "x" (: int #t) (: int (<= "x" res))) (-> "x" (: int #t) (: int (<= "x" res)))))}
+test_ty_check!{test4, (as (λ ("f" "x") ("f" ("f" "x"))) (-> "f" (-> "x" (: int (<= 0 res)) (: int (<= "x" res))) (-> "x" (: int (<= 0 res)) (: int (<= "x" res)))))}
+test_ty_check!{test5,
+    (as (let (("f" (as (λ ("f" "x") ("f" ("f" "x"))) (-> "f" (-> "x" (: int (<= 0 res)) (: int (<= "x" res))) (-> "x" (: int (<= 0 res)) (: int (<= "x" res)))))))
+          ("f" ("add" 1) 0))
+      (: int (<= 0 res)))}
+
+fn main() {
     let mut buf = String::new();
     let mut exp = Exp::default();
-    let mut defs = TypeDefs::new();
-    defs.insert("Unit", ty!((x))).unwrap();
-    defs.insert("Never", ty!((sum))).unwrap();
-    defs.insert("Bool", ty!((sum (def . "Unit") (def . "Unit")))).unwrap();
-    defs.insert("Nat", ty!((sum (def . "Unit") (def . "Nat")))).unwrap();
-    defs.insert("Omega", ty!((fun (def . "Omega") (def . "Never")))).unwrap();
-    loop {
-        println!("{exp:#?}");
+    let context = make_context();
+    let tyctx = || make_tcx(&context);
+    loop{
+        println!("{exp:?}");
         std::io::stdin().read_line(&mut buf).unwrap_or_default();
         match &*buf {
-            "check\n" => println!("{:?}", type_check(&exp, &defs)),
-            "simpl_match\n" => resolve_never(simpl_match(&mut exp, &defs)),
-            "simpl_proj\n" => resolve_never(simpl_proj(&mut exp, &defs)),
-            "simpl_app\n" => resolve_never(simpl_app(&mut exp, &defs)),
-            "simpl\n" => resolve_never(simpl(&mut exp, &defs)),
-            "erase\n" => resolve_never(erase(&mut exp)),
-            "eval\n" => resolve_never(eval(&mut exp, &defs)),
-            "simpl_step\n" => resolve_step(simpl_step(&mut exp, &defs)),
-            "step\n" => resolve_step(step(&mut exp, &defs)),
-            "collapse_let\n" => collapse_lets(&mut exp),
+            "anf\n" => anf::anf_translate(&mut exp),
+            "check\n" => println!("{:#?}", ty_check::infer_type(&exp, &mut tyctx())),
             x if x.trim().chars().all(char::is_numeric) => {
                 let x = x.trim().parse().unwrap();
                 buf.clear();
@@ -51,13 +63,13 @@ fn main () {
                 }
                 match from_str(&buf) {
                     Ok(x) => exp = x,
-                    Err(e) => eprintln!("{e:?}")
+                    Err(e) => eprintln!("{e:?}"),
                 }
             }
-            _ => match from_str(&buf) {
+            _ => match from_str(dbg!(&buf)) {
                 Ok(x) => exp = x,
-                Err(e) => eprintln!("{e:?}")
-            }
+                Err(e) => eprintln!("{e:?}"),
+            },
         }
         buf.clear()
     }

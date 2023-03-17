@@ -5,9 +5,18 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[patch.crates-io]
+serde = { git = "https://github.com/dewert99/serde.git", branch = "deserialize_retry" }
+serde-lexpr = { git = "https://github.com/dewert99/lexpr-rs.git", branch = "untagged_support" }
+lexpr = { git = "https://github.com/dewert99/lexpr-rs.git", branch = "untagged_support" }
+
+
 [dependencies]
 ahash = "0.8.2"
-serde = {features = ["derive"], version = "1.0.147"}
-smallstr = {features = ["serde", "union"], version = "0.3.0"}
-serde-lexpr = "0.1.2"
-lexpr = "0.2.6"
+serde = {features = ["derive"], version = "1.0.153"}
+smallstr = {features = ["serde", "union"], version = "*"}
+serde-lexpr = "*"
+lexpr = "*"
+z3 = {features = ["static-link-z3"], version = "0.11.2"}
+lazy_static = "1.4.0"
+serde_json = "*"

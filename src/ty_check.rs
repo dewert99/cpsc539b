@@ -1,117 +1,287 @@
-use crate::defs::*;
-use crate::semi_persistent::SPHashMap;
+use crate::ctxt::{convert_pred, InferType, Subst, Tenv, TyCtx};
+use crate::defs::{BaseType, Exp, Ident, Lit, Predicate, PrimOp, Type};
+use crate::error_reporting::{apply_subst, infer_ty_to_ty, z3_ast_to_type};
+use crate::ty_check::TypeError::{BadApp, BinderMismatch, CantInfer, NotAnf, NotFun, PredIllFormed, SubType, Unbound};
+use z3::{ast, Model};
 
-type Tenv<'a> = SPHashMap<Ident, &'a Type>;
-
-#[derive(Debug, Eq, PartialEq)]
-pub enum TypeInfo<'a> {
-    Func,
-    Prod(usize),
-    Sum(usize),
-    Type(&'a Type),
+#[derive(Debug)]
+pub enum TypeError<'a, 'ctx> {
+    SubType {
+        exp: &'a Exp,
+        actual: Type,
+        expected: Type,
+        model: Option<Model<'ctx>>,
+    },
+    NotAnf(&'a Exp),
+    CantInfer(&'a Exp),
+    NotFun(Type),
+    Unbound(Ident),
+    PredIllFormed(&'a Type),
+    BinderMismatch(Ident, &'a Type),
+    BadApp,
 }
 
-#[derive(Debug, Eq, PartialEq)]
-pub enum TypeError<'a> {
-    CantInfer,
-    Mismatch { actual: TypeInfo<'a>, expected: TypeInfo<'a> },
-    Unbound,
+#[derive(Eq, PartialEq)]
+enum PredTy {
+    Int,
+    Bool,
 }
 
-use TypeError::*;
+type TCResult<'a, 'ctx, T> = Result<T, TypeError<'a, 'ctx>>;
 
-type Result<'a, T> = core::result::Result<T, (&'a Exp, TypeError<'a>)>;
-
-fn handle_let<'a, T>(bindings: &'a [(Ident, Exp)], tenv: &mut Tenv<'a>, defs: &'a TypeDefs, f: impl Fn(&mut Tenv<'a>) -> Result<'a, T>) -> Result<'a, T> {
-    match bindings {
-        [(id, exp), rest @ ..] => {
-            let ty = infer_type(exp, tenv, defs)?;
-            handle_let(rest, &mut tenv.insert_sp(id.clone(), ty), defs, f)
-        }
-        [] => {
-            f(tenv)
-        }
-    }
-}
-
-
-fn infer_type<'a>(exp: &'a Exp, tenv: &mut Tenv<'a>, defs: &'a TypeDefs) -> Result<'a, &'a Type> {
-    match exp {
-        Var(x) => match tenv.get(x) {
-            Some(v) => Ok(*v),
-            None => Err((exp, Unbound)),
+fn infer_pred_ty(pred: &Predicate, tenv: &Tenv, res_ty: &BaseType) -> Result<PredTy, ()> {
+    let recur = |pred| infer_pred_ty(pred, tenv, res_ty);
+    match pred {
+        Predicate::Res => Ok(PredTy::Int),
+        Predicate::Lit(Lit::Int(_)) => Ok(PredTy::Int),
+        Predicate::Lit(Lit::Bool(_)) => Ok(PredTy::Bool),
+        Predicate::Var(id) => match tenv.get(id) {
+            Some(InferType::Selfify(_, BaseType::Int)) => Ok(PredTy::Int),
+            _ => Err(()),
         },
-        App(box [f, arg]) => {
-            match defs.resolve(infer_type(f, tenv, defs)?) {
-                Fun(box [input, output]) => {
-                    check_type(arg, tenv, defs, input)?;
-                    Ok(output)
-                }
-                ty => Err((f, Mismatch { actual: TypeInfo::Type(ty), expected: TypeInfo::Func }))
-            }
-        }
-        Ascribe(box (exp, ref ty)) => {
-            check_type(exp, tenv, defs, ty)?;
-            Ok(ty)
-        }
-        Proj(idx, box exp) => {
-            match defs.resolve(infer_type(exp, tenv, defs)?) {
-                Prod(box tys) if *idx < tys.len() => Ok(&tys[*idx]),
-                ty => Err((exp, Mismatch { actual: TypeInfo::Type(ty), expected: TypeInfo::Prod(*idx) }))
-            }
-        }
-        Let(box bindings, box body) => {
-            handle_let(bindings, tenv, defs, |tenv| infer_type(body, tenv, defs))
-        }
-        exp => Err((exp, CantInfer))
+        Predicate::Op(box (op, p1, p2)) => match (op, recur(p1)?, recur(p2)?) {
+            (PrimOp::Add | PrimOp::Sub, PredTy::Int, PredTy::Int) => Ok(PredTy::Int),
+            (PrimOp::Le, PredTy::Int, PredTy::Int) => Ok(PredTy::Bool),
+            (PrimOp::Add | PrimOp::Or, PredTy::Bool, PredTy::Bool) => Ok(PredTy::Bool),
+            (PrimOp::Eq, ty1, ty2) if ty1 == ty2 => Ok(PredTy::Bool),
+            _ => Err(()),
+        },
+        Predicate::Not(box [p]) => match recur(p)? {
+            PredTy::Bool => Ok(PredTy::Bool),
+            _ => Err(()),
+        },
+        Predicate::If(box [i, t, e]) => match (recur(i)?, recur(t)?, recur(e)?) {
+            (PredTy::Bool, ty1, ty2) if ty1 == ty2 => Ok(ty1),
+            _ => Err(()),
+        },
     }
 }
 
-fn check_type<'a>(exp: &'a Exp, tenv: &mut Tenv<'a>, defs: &'a TypeDefs, ty: &'a Type) -> Result<'a, ()> {
+fn check_type_well_formed<'a, 'ctx>(
+    ty: &'a Type,
+    tcx: &mut TyCtx<'a, 'ctx>,
+) -> Result<(), &'a Type> {
+    match ty {
+        Type::Refined(base, box pred) => match infer_pred_ty(pred, &tcx.tenv, base) {
+            Ok(PredTy::Bool) => Ok(()),
+            _ => Err(ty),
+        },
+        // Dep Fun
+        Type::Fun(box (id, arg_ty @ Type::Refined(base, _), ret_ty)) => {
+            check_type_well_formed(arg_ty, tcx)?;
+            let dummy_ty = InferType::Selfify(tcx.fresh_const(&base, "dummy"), &base);
+            check_type_well_formed(ret_ty, &mut *tcx.insert_sp(id, dummy_ty))
+        }
+        Type::Fun(box (_, arg_ty, ret_ty)) => {
+            check_type_well_formed(arg_ty, tcx)?;
+            check_type_well_formed(ret_ty, tcx)
+        }
+    }
+}
+
+fn check_subtype_val<'a, 'ctx>(
+    actual: &ast::Dynamic<'ctx>,
+    acutal_base: &BaseType,
+    expect: &'a Type,
+    expect_s: &'a Subst<'ctx>,
+    tcx: &TyCtx<'a, 'ctx>,
+) -> Result<(), Option<Model<'ctx>>> {
+    match expect {
+        Type::Refined(base, pred) if acutal_base == base => {
+            let pre_cond_check = convert_pred(&expect_s, tcx, pred, actual)
+                .as_bool()
+                .unwrap();
+            tcx.check(pre_cond_check).map_err(Some)
+        }
+        _ => Err(None),
+    }
+}
+
+fn check_subtype<'a, 'ctx>(
+    actual: &mut InferType<'a, 'ctx>,
+    expect: &'a Type,
+    expect_s: &mut Subst<'ctx>,
+    tcx: &mut TyCtx<'a, 'ctx>,
+) -> Result<(), Option<Model<'ctx>>> {
+    match actual {
+        InferType::Selfify(actual, actual_base) => {
+            check_subtype_val(actual, actual_base, expect, expect_s, tcx)
+        }
+        InferType::Subst(actual_s, actual) => {
+            check_subtype_h(actual, actual_s, expect, expect_s, tcx)
+        }
+    }
+}
+
+fn check_subtype_h<'a, 'ctx>(
+    actual: &'a Type,
+    actual_s: &mut Subst<'ctx>,
+    expect: &'a Type,
+    expect_s: &mut Subst<'ctx>,
+    tcx: &mut TyCtx<'a, 'ctx>,
+) -> Result<(), Option<Model<'ctx>>> {
+    match (actual, expect) {
+        (Type::Refined(actual_base, actual_pred), Type::Refined(expect_base, expect_pred))
+            if actual_base == expect_base =>
+        {
+            let fresh_const = tcx.fresh_const(actual_base, "res");
+            let actual_pred = convert_pred(actual_s, tcx, actual_pred, &fresh_const)
+                .as_bool()
+                .unwrap();
+            let expect_pred = convert_pred(expect_s, tcx, expect_pred, &fresh_const)
+                .as_bool()
+                .unwrap();
+            tcx.check(ast::Bool::implies(&actual_pred, &expect_pred))
+                .map_err(Some)
+        }
+        // Dependent Fun
+        (
+            Type::Fun(box (actual_id, actual_in, actual_out)),
+            Type::Fun(box (expect_id, expect_in @ Type::Refined(expected_in_base, _), expect_out)),
+        ) => {
+            let new_tcx =
+                &mut *tcx.insert_sp(expect_id, InferType::Subst(expect_s.clone(), expect_in));
+            let Some(InferType::Selfify(expected_in_val, _)) = new_tcx.tenv.get(expect_id) else {
+                unreachable!()
+            };
+            check_subtype_val(
+                expected_in_val,
+                &expected_in_base,
+                actual_in,
+                actual_s,
+                new_tcx,
+            )?;
+            let actual_s = &mut *actual_s.insert_sp(actual_id.clone(), expected_in_val.clone());
+            let expect_s = &mut *expect_s.insert_sp(expect_id.clone(), expected_in_val.clone());
+            check_subtype_h(actual_out, actual_s, expect_out, expect_s, new_tcx)
+        }
+        // Fun
+        (Type::Fun(box (_, actual_in, actual_out)), Type::Fun(box (_, expect_in, expect_out))) => {
+            check_subtype_h(expect_in, expect_s, actual_in, actual_s, tcx)?;
+            check_subtype_h(actual_out, actual_s, expect_out, expect_s, tcx)
+        }
+        _ => Err(None),
+    }
+}
+
+pub fn infer_type<'a, 'ctx>(
+    exp: &'a Exp,
+    tcx: &mut TyCtx<'a, 'ctx>,
+) -> TCResult<'a, 'ctx, InferType<'a, 'ctx>> {
     match exp {
-        Lambda(box (var, body)) => match defs.resolve(ty) {
-            Fun(box [input, output]) =>
-                check_type(body, &mut tenv.insert_sp(var.clone(), input), defs, output),
-            ty => Err((exp, Mismatch { actual: TypeInfo::Func, expected: TypeInfo::Type(ty) }))
-        }
-        Tuple(box exps) => match defs.resolve(ty) {
-            Prod(box tys) if tys.len() == exps.len() => {
-                exps.iter().zip(tys.iter()).try_for_each(|(exp, ty)| check_type(exp, tenv, defs, ty))
-            }
-            ty => Err((exp, Mismatch { actual: TypeInfo::Prod(exps.len()), expected: TypeInfo::Type(ty) }))
-        }
-        Inj(idx, box exp) => match defs.resolve(ty) {
-            Sum(box tys) if *idx < tys.len() => check_type(exp, tenv, defs, &tys[*idx]),
-            ty => Err((exp, Mismatch { actual: TypeInfo::Sum(*idx), expected: TypeInfo::Type(ty) }))
-        }
-        Match(box scrut, box arms) => {
-            match defs.resolve(infer_type(scrut, tenv, defs)?) {
-                Sum(box tys) if tys.len() == arms.len() => {
-                    arms.iter().zip(tys.iter()).try_for_each(|((id, exp), id_ty)|
-                        check_type(exp, &mut tenv.insert_sp(id.clone(), id_ty), defs, ty))
+        Exp::Lit(n) => Ok(InferType::Selfify(
+            ast::Int::from_i64(tcx.ctx(), *n as i64).into(),
+            &BaseType::Int,
+        )),
+        Exp::Var(id) => tcx.tenv.get(id).ok_or(Unbound(id.clone())).cloned(),
+        Exp::App(box []) => Err(BadApp),
+        Exp::App(box [f, args @ ..]) => {
+            args.iter().fold(infer_type(f, tcx), |f_ty, arg| {
+                match (f_ty?, infer_type(arg, tcx)?) {
+                    (
+                        bad @ (InferType::Subst(_, Type::Refined(..)) | InferType::Selfify(..)),
+                        _,
+                    ) => Err(NotFun(infer_ty_to_ty(&bad))),
+                    // Dependent Fun
+                    (
+                        InferType::Subst(subst, Type::Fun(box (id, arg_ty, ret_ty))),
+                        InferType::Selfify(z3_val, base),
+                    ) => {
+                        check_subtype_val(&z3_val, base, arg_ty, &subst, tcx).map_err(|model| {
+                            SubType {
+                                model,
+                                exp: arg,
+                                actual: z3_ast_to_type(&z3_val, base),
+                                expected: apply_subst(arg_ty, &subst),
+                            }
+                        })?;
+                        let subst = subst.map(|data| {
+                            data.insert(id.clone(), z3_val);
+                        });
+                        Ok(InferType::Subst(subst, ret_ty))
+                    }
+                    (_, InferType::Subst(_, Type::Refined(..))) => Err(NotAnf(exp)), // Not in ANF
+                    // Fun
+                    (
+                        InferType::Subst(mut f_subst, Type::Fun(box (_, expect_arg, ret_ty))),
+                        mut actual_arg,
+                    ) => {
+                        check_subtype(&mut actual_arg, expect_arg, &mut f_subst, tcx).map_err(
+                            |model| SubType {
+                                model,
+                                exp: arg,
+                                actual: infer_ty_to_ty(&actual_arg),
+                                expected: apply_subst(expect_arg, &f_subst),
+                            },
+                        )?;
+                        Ok(InferType::Subst(f_subst, ret_ty))
+                    }
                 }
-                ty => Err((scrut, Mismatch { actual: TypeInfo::Type(ty), expected: TypeInfo::Sum(arms.len()) }))
-            }
+            })
         }
-        Fix(box (var, body)) => {
-            check_type(body, &mut tenv.insert_sp(var.clone(), ty), defs, ty)
+        Exp::Ascribe(box (exp, ty)) => {
+            check_type_well_formed(ty, tcx).map_err(PredIllFormed)?;
+            check_type(exp, ty, tcx)?;
+            Ok(InferType::Subst(Subst::default(), ty))
         }
-        Let(box bindings, box body) => {
-            handle_let(bindings, tenv, defs,|tenv| check_type(body, tenv, defs, ty))
-        }
-        // CheckInfer
-        _ => {
-            let actual = infer_type(exp, tenv, defs)?;
-            if actual == ty {
-                Ok(())
+        _ => Err(CantInfer(exp)),
+    }
+}
+
+fn check_lambda<'a, 'ctx>(
+    vars: &'a [Ident],
+    body: &'a Exp,
+    ty: &'a Type,
+    tcx: &mut TyCtx<'a, 'ctx>,
+) -> TCResult<'a, 'ctx, ()> {
+    match (vars, ty) {
+        ([], _) => check_type(body, ty, tcx),
+        ([id, rest @ ..], ty@Type::Fun(box (id2, arg_ty, ret_ty))) =>
+            if id == id2 {
+                check_lambda(
+                    rest,
+                    body,
+                    ret_ty,
+                    &mut *tcx.insert_sp(id, InferType::Subst(Subst::default(), arg_ty)),
+                )
             } else {
-                Err((exp, Mismatch { actual: TypeInfo::Type(actual), expected: TypeInfo::Type(ty) }))
-            }
+                Err(BinderMismatch(id.clone(), ty))
+            },
+        (_, Type::Refined(..)) => Err(NotFun(ty.clone())),
+    }
+}
+
+fn check_let<'a, 'ctx>(
+    bindings: &'a [(Ident, Exp)],
+    body: &'a Exp,
+    ty: &'a Type,
+    tcx: &mut TyCtx<'a, 'ctx>,
+) -> TCResult<'a, 'ctx, ()> {
+    match bindings {
+        [] => check_type(body, ty, tcx),
+        [(id, exp), rest @ ..] => {
+            let bound_ty = infer_type(exp, tcx)?;
+            check_let(rest, body, ty, &mut *tcx.insert_sp(id, bound_ty))
         }
     }
 }
 
-pub fn type_check<'a>(exp: &'a Exp, defs: &'a TypeDefs) -> Result<'a, &'a Type> {
-    let mut tenv = Tenv::default();
-    infer_type(exp, &mut tenv, defs)
+fn check_type<'a, 'ctx>(
+    exp: &'a Exp,
+    ty: &'a Type,
+    tcx: &mut TyCtx<'a, 'ctx>,
+) -> TCResult<'a, 'ctx, ()> {
+    match exp {
+        Exp::Lambda(box vars, box body) => check_lambda(vars, body, ty, tcx),
+        Exp::Let(box bindings, box body) => check_let(bindings, body, ty, tcx),
+        _ => {
+            let mut inf_ty = infer_type(exp, tcx)?;
+            check_subtype(&mut inf_ty, ty, &mut Subst::default(), tcx).map_err(|model| SubType {
+                actual: infer_ty_to_ty(&inf_ty),
+                expected: ty.clone(),
+                exp,
+                model,
+            })
+        }
+    }
 }

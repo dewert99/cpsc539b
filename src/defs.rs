@@ -1,78 +1,93 @@
-use std::collections::hash_map::Entry;
-use ahash::AHashMap;
+use serde::{Deserialize, Serialize, Serializer};
 use smallstr::SmallString;
-use serde::{Serialize, Deserialize};
 
 pub type Ident = SmallString<[u8; 16]>;
 
-#[derive(Serialize, Deserialize, Clone, Eq, PartialEq)]
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum Lit {
+    Bool(bool),
+    Int(i32),
+}
+
+#[derive(Serialize, Deserialize, Copy, Clone)]
 #[serde(rename_all = "kebab-case")]
-pub enum Type {
+pub enum PrimOp {
     #[serde(alias = "+")]
     #[serde(rename(serialize = "+"))]
-    Sum(Box<[Type]>),
-    #[serde(alias = "x")]
-    #[serde(rename(serialize = "x"))]
-    Prod(Box<[Type]>),
+    Add,
+    #[serde(alias = "-")]
+    #[serde(rename(serialize = "-"))]
+    Sub,
+    #[serde(alias = "<=")]
+    #[serde(rename(serialize = "<="))]
+    Le,
+    #[serde(alias = "=")]
+    #[serde(rename(serialize = "="))]
+    Eq,
+    #[serde(alias = "&&")]
+    #[serde(rename(serialize = "&&"))]
+    And,
+    #[serde(alias = "||")]
+    #[serde(rename(serialize = "||"))]
+    Or,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "kebab-case")]
+pub enum Predicate {
+    Res,
+    #[serde(alias = "!")]
+    #[serde(rename(serialize = "!"))]
+    Not(Box<[Predicate; 1]>),
+    If(Box<[Predicate; 3]>),
+    #[serde(untagged)]
+    Var(Ident),
+    #[serde(untagged)]
+    Lit(Lit),
+    #[serde(untagged)]
+    Op(Box<(PrimOp, Predicate, Predicate)>),
+}
+
+#[derive(Serialize, Deserialize, Clone, Eq, PartialEq, Debug)]
+#[serde(rename_all = "kebab-case")]
+pub enum BaseType {
+    Int,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "kebab-case")]
+pub enum Type {
+    #[serde(alias = ":")]
+    #[serde(rename(serialize = ":"))]
+    Refined(BaseType, Box<Predicate>), // The value variable is always Res
     #[serde(alias = "->")]
     #[serde(rename(serialize = "->"))]
-    Fun(Box<[Type; 2]>),
-    Def(Ident),
-}
-
-pub struct TypeDefs(AHashMap<Ident, Type>);
-
-impl TypeDefs {
-    pub fn insert(&mut self, id: &str, ty: Type) -> Result<(), ()> {
-        match self.0.entry(id.into()) {
-            Entry::Occupied(_) => Err(()),
-            Entry::Vacant(vac) => {
-                vac.insert(ty);
-                Ok(())
-            }
-        }
-    }
-
-    pub fn resolve<'a>(&'a self, ty: &'a Type) -> &'a Type {
-        match ty {
-            Def(id) => self.0.get(id).unwrap_or(ty), // Treat undefined type-defs opaquely
-            _ => ty
-        }
-    }
-
-    pub fn new() -> Self {
-        TypeDefs(AHashMap::new())
-    }
-}
-
-
-impl Default for Type {
-    fn default() -> Self {
-        Prod(Box::new([]))
-    }
+    Fun(Box<(Ident, Type, Type)>),
 }
 
 pub use Type::*;
 
-#[derive(Serialize, Deserialize, Eq, PartialEq, Clone)]
+fn serialize_one<S: Serializer, X: Serialize>(x: &X, s: S) -> Result<S::Ok, S::Error> {
+    x.serialize(s)
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "kebab-case")]
 pub enum Exp {
     #[serde(alias = "λ")]
     #[serde(rename(serialize = "λ"))]
-    Lambda(Box<(Ident, Exp)>),
-    Var(Ident),
-    #[serde(alias = "$")]
-    #[serde(rename(serialize = "$"))]
-    App(Box<[Exp; 2]>),
+    Lambda(Box<[Ident]>, Box<Exp>),
     #[serde(alias = "as")]
     #[serde(rename(serialize = "as"))]
     Ascribe(Box<(Exp, Type)>),
-    Tuple(Box<[Exp]>),
-    Proj(usize, Box<Exp>),
-    Inj(usize, Box<Exp>),
-    Match(Box<Exp>, Box<[(Ident, Exp)]>),
-    Fix(Box<(Ident, Exp)>),
-    Let(Box<[(Ident, Exp)]>, Box<Exp>)
+    Let(Box<[(Ident, Exp)]>, Box<Exp>),
+    #[serde(untagged)]
+    App(Box<[Exp]>),
+    #[serde(untagged)]
+    Lit(i32),
+    #[serde(untagged)]
+    Var(Ident),
 }
 
 impl Default for Exp {
@@ -83,7 +98,9 @@ impl Default for Exp {
 
 #[macro_export]
 macro_rules! exp {
-    ($t:tt) => {serde_lexpr::from_value::<crate::defs::Exp>(&lexpr::sexp!($t)).unwrap()}
+    ($t:tt) => {
+        serde_lexpr::from_value::<crate::defs::Exp>(&lexpr::sexp!($t)).unwrap()
+    };
 }
 
 #[macro_export]
@@ -92,4 +109,3 @@ macro_rules! ty {
 }
 
 pub use Exp::*;
-
