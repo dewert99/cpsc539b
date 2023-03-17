@@ -1,8 +1,8 @@
 use crate::ctxt::{convert_pred, InferType, Subst, Tenv, TyCtx};
 use crate::defs::{BaseType, Exp, Ident, Lit, Predicate, PrimOp, Type};
 use crate::error_reporting::{apply_subst, infer_ty_to_ty, z3_ast_to_type};
-use crate::ty_check::TypeError::{BadApp, BinderMismatch, CantInfer, NotAnf, NotFun, PredIllFormed, SubType, Unbound};
-use z3::{ast, Model};
+use crate::ty_check::TypeError::*;
+use z3::{ast, Context, Model};
 
 #[derive(Debug)]
 pub enum TypeError<'a, 'ctx> {
@@ -13,6 +13,7 @@ pub enum TypeError<'a, 'ctx> {
         model: Option<Model<'ctx>>,
     },
     NotAnf(&'a Exp),
+    NotBool(Type, &'a Exp),
     CantInfer(&'a Exp),
     NotFun(Type),
     Unbound(Ident),
@@ -21,22 +22,24 @@ pub enum TypeError<'a, 'ctx> {
     BadApp,
 }
 
-#[derive(Eq, PartialEq)]
-enum PredTy {
-    Int,
-    Bool,
-}
+type PredTy = BaseType;
 
 type TCResult<'a, 'ctx, T> = Result<T, TypeError<'a, 'ctx>>;
+
+fn lit_kind(l: &Lit) -> &'static BaseType {
+    match l {
+        Lit::Int(_) => &PredTy::Int,
+        Lit::Bool(_) => &PredTy::Bool,
+    }
+}
 
 fn infer_pred_ty(pred: &Predicate, tenv: &Tenv, res_ty: &BaseType) -> Result<PredTy, ()> {
     let recur = |pred| infer_pred_ty(pred, tenv, res_ty);
     match pred {
-        Predicate::Res => Ok(PredTy::Int),
-        Predicate::Lit(Lit::Int(_)) => Ok(PredTy::Int),
-        Predicate::Lit(Lit::Bool(_)) => Ok(PredTy::Bool),
+        Predicate::Res => Ok(res_ty.clone()),
+        Predicate::Lit(l) => Ok(lit_kind(l).clone()),
         Predicate::Var(id) => match tenv.get(id) {
-            Some(InferType::Selfify(_, BaseType::Int)) => Ok(PredTy::Int),
+            Some(InferType::Selfify(_, ty)) => Ok((*ty).clone()),
             _ => Err(()),
         },
         Predicate::Op(box (op, p1, p2)) => match (op, recur(p1)?, recur(p2)?) {
@@ -164,15 +167,21 @@ fn check_subtype_h<'a, 'ctx>(
     }
 }
 
+fn lit_to_z3<'ctx>(l: &Lit, ctx: &'ctx Context) -> ast::Dynamic<'ctx> {
+    match l {
+        Lit::Int(n) => ast::Int::from_i64(ctx, *n as i64).into(),
+        Lit::Bool(b) => ast::Bool::from_bool(ctx, *b).into(),
+    }
+}
+
 pub fn infer_type<'a, 'ctx>(
     exp: &'a Exp,
     tcx: &mut TyCtx<'a, 'ctx>,
 ) -> TCResult<'a, 'ctx, InferType<'a, 'ctx>> {
     match exp {
-        Exp::Lit(n) => Ok(InferType::Selfify(
-            ast::Int::from_i64(tcx.ctx(), *n as i64).into(),
-            &BaseType::Int,
-        )),
+        Exp::Lit(l) => {
+            Ok(InferType::Selfify(lit_to_z3(l, tcx.ctx()), &lit_kind(l)))
+        },
         Exp::Var(id) => tcx.tenv.get(id).ok_or(Unbound(id.clone())).cloned(),
         Exp::App(box []) => Err(BadApp),
         Exp::App(box [f, args @ ..]) => {
@@ -236,7 +245,7 @@ fn check_lambda<'a, 'ctx>(
 ) -> TCResult<'a, 'ctx, ()> {
     match (vars, ty) {
         ([], _) => check_type(body, ty, tcx),
-        ([id, rest @ ..], ty@Type::Fun(box (id2, arg_ty, ret_ty))) =>
+        ([id, rest @ ..], ty @ Type::Fun(box (id2, arg_ty, ret_ty))) => {
             if id == id2 {
                 check_lambda(
                     rest,
@@ -246,7 +255,8 @@ fn check_lambda<'a, 'ctx>(
                 )
             } else {
                 Err(BinderMismatch(id.clone(), ty))
-            },
+            }
+        }
         (_, Type::Refined(..)) => Err(NotFun(ty.clone())),
     }
 }
@@ -274,6 +284,14 @@ fn check_type<'a, 'ctx>(
     match exp {
         Exp::Lambda(box vars, box body) => check_lambda(vars, body, ty, tcx),
         Exp::Let(box bindings, box body) => check_let(bindings, body, ty, tcx),
+        Exp::If(box [i, t, e]) => match infer_type(i, tcx)? {
+            InferType::Selfify(z3_val, BaseType::Bool) => {
+                check_type(t, ty,&mut *tcx.add_assumption(z3_val.as_bool().unwrap()))?;
+                check_type(e, ty,&mut *tcx.add_assumption(!z3_val.as_bool().unwrap()))
+            }
+            InferType::Selfify(z3_val, ty) => Err(NotBool(z3_ast_to_type(&z3_val, ty), exp)),
+            InferType::Subst(_, _) => Err(NotAnf(exp)),
+        },
         _ => {
             let mut inf_ty = infer_type(exp, tcx)?;
             check_subtype(&mut inf_ty, ty, &mut Subst::default(), tcx).map_err(|model| SubType {

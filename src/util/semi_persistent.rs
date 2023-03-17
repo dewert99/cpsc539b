@@ -111,18 +111,17 @@ impl<'a, K: Hash + Eq + Clone, V> SPHashMap<K, V> {
         )
     }
 
-    pub fn remove_sp(
-        &mut self,
-        key: K,
-    ) -> Revert<'_, AHashMap<K, V>, impl FnMut(&mut AHashMap<K, V>) + '_> {
-        let k2 = key.clone();
+    pub fn remove_sp<'b>(
+        &'b mut self,
+        key: &'b K,
+    ) -> Revert<'_, AHashMap<K, V>, impl FnMut(&mut AHashMap<K, V>) + 'b> {
         self.do_and_revert(
-            move |data| data.remove(&key),
+            move |data| data.remove(key),
             move |last_val, data| {
                 match last_val.take() {
                     None => {}
                     Some(val) => {
-                        data.insert(k2.clone(), val);
+                        data.insert(key.clone(), val);
                     }
                 };
             },

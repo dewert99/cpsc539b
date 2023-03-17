@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use smallstr::SmallString;
 
 pub type Ident = SmallString<[u8; 16]>;
@@ -53,6 +53,7 @@ pub enum Predicate {
 #[serde(rename_all = "kebab-case")]
 pub enum BaseType {
     Int,
+    Bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -68,10 +69,6 @@ pub enum Type {
 
 pub use Type::*;
 
-fn serialize_one<S: Serializer, X: Serialize>(x: &X, s: S) -> Result<S::Ok, S::Error> {
-    x.serialize(s)
-}
-
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "kebab-case")]
 pub enum Exp {
@@ -82,10 +79,11 @@ pub enum Exp {
     #[serde(rename(serialize = "as"))]
     Ascribe(Box<(Exp, Type)>),
     Let(Box<[(Ident, Exp)]>, Box<Exp>),
+    If(Box<[Exp; 3]>),
     #[serde(untagged)]
     App(Box<[Exp]>),
     #[serde(untagged)]
-    Lit(i32),
+    Lit(Lit),
     #[serde(untagged)]
     Var(Ident),
 }

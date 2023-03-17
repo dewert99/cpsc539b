@@ -1,4 +1,4 @@
-use crate::defs::{Exp, Ident};
+use crate::defs::{Exp, Ident, Predicate, Type};
 use crate::util::SPHashMap;
 use ahash::AHashMap;
 use std::fmt::Write;
@@ -38,6 +38,34 @@ fn anf_translate_h(exp: &mut Exp, var_map: &mut SPHashMap<Ident, Ident>) {
     }
 }
 
+fn anf_translate_pred(pred: &mut Predicate, var_map: &AHashMap<Ident, Ident>) {
+    let recur = |pred| anf_translate_pred(pred, var_map);
+    match pred {
+        Predicate::Res | Predicate::Lit(_) => {}
+        Predicate::Not(box [x]) => recur(x),
+        Predicate::If(box preds) => preds.iter_mut().for_each(recur),
+        Predicate::Var(v) => {
+            if let Some(x) = var_map.get(v) {
+                *v = x.clone()
+            }
+        }
+        Predicate::Op(box (_, pred1, pred2)) => {
+            recur(pred1);
+            recur(pred2)
+        }
+    }
+}
+
+fn anf_translate_ty(ty: &mut Type, var_map: &mut SPHashMap<Ident, Ident>) {
+    match ty {
+        Type::Refined(_, box pred) => anf_translate_pred(pred, &*var_map),
+        Type::Fun(box (id, arg_ty, res_ty)) => {
+            anf_translate_ty(arg_ty, var_map);
+            anf_translate_ty(res_ty, &mut *var_map.remove_sp(id));
+        }
+    }
+}
+
 fn anf_translate_bindings(
     exp: &mut Exp,
     var_map: &mut SPHashMap<Ident, Ident>,
@@ -52,19 +80,18 @@ fn anf_translate_bindings(
             }
         }
         Exp::Lambda(_, box exp) => anf_translate_h(exp, var_map),
-        Exp::App(box []) => {},
+        Exp::App(box []) => {}
         Exp::App(box [f, args @ ..]) => {
             anf_translate_bindings(f, var_map, bindings, fresh);
             for arg in args {
                 anf_translate_bindings(arg, var_map, bindings, fresh);
-                if !matches!(arg, Exp::Var(_)) {
-                    let fresh_var = fresh.fresh();
-                    let old_arg = mem::replace(arg, Exp::Var(fresh_var.clone()));
-                    bindings.push((fresh_var, old_arg));
-                }
+                lift_to_let(bindings, fresh, arg);
             }
         }
-        Exp::Ascribe(box (exp, _)) => anf_translate_h(exp, var_map),
+        Exp::Ascribe(box (exp, ty)) => {
+            anf_translate_ty(ty, var_map);
+            anf_translate_h(exp, var_map)
+        },
         exp @ Exp::Let(..) => {
             let Exp::Let(mut src_bindings, box inner_exp) = mem::take(exp) else {
                 panic!()
@@ -72,6 +99,20 @@ fn anf_translate_bindings(
             *exp = inner_exp;
             anf_translate_let(&mut *src_bindings, exp, var_map, bindings, fresh)
         }
+        Exp::If(box [i, t, e]) => {
+            anf_translate_bindings(i, var_map, bindings, fresh);
+            lift_to_let(bindings, fresh, i);
+            anf_translate(t);
+            anf_translate(e);
+        }
+    }
+}
+
+fn lift_to_let(bindings: &mut Vec<(Ident, Exp)>, fresh: &mut Fresh, exp: &mut Exp) {
+    if !matches!(exp, Exp::Var(_) | Exp::Lit(_)) {
+        let fresh_var = fresh.fresh();
+        let old_arg = mem::replace(exp, Exp::Var(fresh_var.clone()));
+        bindings.push((fresh_var, old_arg));
     }
 }
 

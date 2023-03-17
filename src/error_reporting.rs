@@ -16,8 +16,14 @@ fn z3_ast_to_pred(z3_ast: &ast::Dynamic) -> Predicate {
         )),
         AstKind::App | AstKind::Var => {
             let z3_ast_str = z3_ast.to_string();
-            let (orig, _) = z3_ast_str.split_once("!").unwrap();
-            Predicate::Var(orig.into())
+            match &*z3_ast_str {
+                "true" => Predicate::Lit(Lit::Bool(true)),
+                "false" => Predicate::Lit(Lit::Bool(false)),
+                _ => {
+                    let (orig, _) = z3_ast_str.split_once("!").unwrap();
+                    Predicate::Var(orig.into())
+                }
+            }
         },
         _ => panic!(),
     }

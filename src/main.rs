@@ -43,6 +43,9 @@ test_ty_check!{test5,
     (as (let (("f" (as (λ ("f" "x") ("f" ("f" "x"))) (-> "f" (-> "x" (: int (<= 0 res)) (: int (<= "x" res))) (-> "x" (: int (<= 0 res)) (: int (<= "x" res)))))))
           ("f" ("add" 1) 0))
       (: int (<= 0 res)))}
+test_ty_check!(test6, (as (λ ("x") (if "x" (if "x" #t #f) #t)) (-> "x" (: bool #t) (: bool res))));
+test_ty_check!(test_abs, (as (λ ("x") (if ("le" "x" 0) ("sub" 0 "x") "x")) (-> "x" (: int #t) (: int (<= 0 res)))));
+test_ty_check!(test_let_bound_in_refinement, (as (let (("x" #t)) (as 0 (: int "x"))) (: int #t)));
 
 fn main() {
     let mut buf = String::new();

@@ -15,6 +15,23 @@ pub struct TyCtxBase<'a, 'ctx> {
     pub solver: Solver<'ctx>,
 }
 
+impl<'a, 'ctx> TyCtxBase<'a, 'ctx> {
+    fn push(&mut self) {
+        println!("(push)");
+        self.solver.push();
+    }
+
+    fn pop(&mut self) {
+        println!("(pop)");
+        self.solver.pop(1);
+    }
+
+    fn assert(&mut self, b: &ast::Bool) {
+        println!("(assert {b})");
+        self.solver.assert(b)
+    }
+}
+
 pub type TyCtx<'a, 'ctx> = SemiPersistent<TyCtxBase<'a, 'ctx>>;
 
 pub type Subst<'ctx> = SPHashMap<Ident, ast::Dynamic<'ctx>>;
@@ -25,11 +42,6 @@ pub enum InferType<'a, 'ctx> {
     Selfify(ast::Dynamic<'ctx>, &'a BaseType),
 }
 
-fn fresh_const<'ctx>(ctx: &'ctx Context, ty: &BaseType, prefix: &str) -> ast::Dynamic<'ctx> {
-    match ty {
-        BaseType::Int => ast::Int::fresh_const(ctx, prefix).into(),
-    }
-}
 
 pub fn convert_pred<'ctx>(
     subst: &Subst<'ctx>,
@@ -77,19 +89,20 @@ impl<'a, 'ctx> TyCtx<'a, 'ctx> {
     pub fn fresh_const(&self, ty: &BaseType, prefix: &str) -> ast::Dynamic<'ctx> {
         match ty {
             BaseType::Int => ast::Int::fresh_const(self.ctx(), prefix).into(),
+            BaseType::Bool => ast::Bool::fresh_const(self.ctx(), prefix).into(),
         }
     }
 
     pub fn add_assumption<'b>(
         &'b mut self,
-        assume: &'b ast::Bool<'ctx>,
+        assume: ast::Bool<'ctx>,
     ) -> impl DerefMut<Target = TyCtx<'a, 'ctx>> + 'b {
         self.do_and_revert(
-            |data| {
-                data.solver.push();
-                data.solver.assert(assume);
+            move|data| {
+                data.push();
+                data.assert(&assume);
             },
-            |_, data| data.solver.pop(1),
+            |_, data| data.pop(),
         )
     }
 
@@ -100,14 +113,12 @@ impl<'a, 'ctx> TyCtx<'a, 'ctx> {
     ) -> impl DerefMut<Target = TyCtx<'a, 'ctx>> + 'b {
         match ty {
             InferType::Subst(subst, Type::Refined(b_ty, box r)) => {
-                let z3_const = fresh_const(self.ctx(), b_ty, id.as_str());
+                let z3_const = self.fresh_const(b_ty, id.as_str());
                 let z3_pred = convert_pred(&subst, self, r, &z3_const).as_bool().unwrap();
                 Either::L(self.do_and_revert(
                     move |data| {
-                        println!("(push)");
-                        data.solver.push();
-                        println!("(assert {z3_pred})");
-                        data.solver.assert(&z3_pred);
+                        data.push();
+                        data.assert(&z3_pred);
                         data.tenv
                             .insert(id.clone(), InferType::Selfify(z3_const, b_ty))
                     },
@@ -116,8 +127,7 @@ impl<'a, 'ctx> TyCtx<'a, 'ctx> {
                             None => data.tenv.remove(id),
                             Some(val) => data.tenv.insert(id.clone(), val),
                         };
-                        println!("(pop)");
-                        data.solver.pop(1);
+                        data.pop();
                     },
                 ))
             }
@@ -146,12 +156,18 @@ impl<'a, 'ctx> TyCtx<'a, 'ctx> {
 lazy_static!{
     static ref ADD_TY: Type = ty!((-> "x" (: int #t) (fun "y" (: int #t) (: int (= res (+ "x" "y"))))));
     static ref SUB_TY: Type = ty!((-> "x" (: int #t) (fun "y" (: int #t) (: int (= res (sub "x" "y"))))));
+    static ref LE_TY: Type = ty!((-> "x" (: int #t) (fun "y" (: int #t) (: bool (= res (<= "x" "y"))))));
+    static ref EQ_TY: Type = ty!((-> "x" (: int #t) (fun "y" (: int #t) (: bool (= res (= "x" "y"))))));
+    static ref ASSERT_TY: Type = ty!((-> "x" (: bool res) (: bool res)));
 }
 
 pub fn make_tenv() -> Tenv<'static, 'static> {
     AHashMap::from([
         ("add".into(), InferType::Subst(Subst::default(), &*ADD_TY)),
         ("sub".into(), InferType::Subst(Subst::default(), &*SUB_TY)),
+        ("le".into(), InferType::Subst(Subst::default(), &*LE_TY)),
+        ("eq".into(), InferType::Subst(Subst::default(), &*EQ_TY)),
+        ("assert".into(), InferType::Subst(Subst::default(), &*ASSERT_TY))
     ])
 }
 
