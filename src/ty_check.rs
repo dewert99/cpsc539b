@@ -179,9 +179,7 @@ pub fn infer_type<'a, 'ctx>(
     tcx: &mut TyCtx<'a, 'ctx>,
 ) -> TCResult<'a, 'ctx, InferType<'a, 'ctx>> {
     match exp {
-        Exp::Lit(l) => {
-            Ok(InferType::Selfify(lit_to_z3(l, tcx.ctx()), &lit_kind(l)))
-        },
+        Exp::Lit(l) => Ok(InferType::Selfify(lit_to_z3(l, tcx.ctx()), &lit_kind(l))),
         Exp::Var(id) => tcx.tenv.get(id).ok_or(Unbound(id.clone())).cloned(),
         Exp::App(box []) => Err(BadApp),
         Exp::App(box [f, args @ ..]) => {
@@ -247,12 +245,7 @@ fn check_lambda<'a, 'ctx>(
         ([], _) => check_type(body, ty, tcx),
         ([id, rest @ ..], ty @ Type::Fun(box (id2, arg_ty, ret_ty))) => {
             if id == id2 {
-                check_lambda(
-                    rest,
-                    body,
-                    ret_ty,
-                    &mut *tcx.insert_sp(id, InferType::Subst(Subst::default(), arg_ty)),
-                )
+                check_lambda(rest, body, ret_ty, &mut *tcx.insert_sp(id, arg_ty.into()))
             } else {
                 Err(BinderMismatch(id.clone(), ty))
             }
@@ -276,6 +269,20 @@ fn check_let<'a, 'ctx>(
     }
 }
 
+fn check_let_rec<'a, 'ctx>(
+    bindings: &'a [(Ident, Exp, Type)],
+    tcx: &mut TyCtx<'a, 'ctx>,
+    then: impl FnOnce(&mut TyCtx<'a, 'ctx>) -> TCResult<'a, 'ctx, ()>,
+) -> TCResult<'a, 'ctx, ()> {
+    match bindings {
+        [] => then(tcx),
+        [(id, _, bound_ty@Type::Fun(..)), rest @ ..] => {
+            check_let_rec(rest, &mut *tcx.insert_sp(id, bound_ty.into()), then)
+        }
+        [(_, _, ty), ..] => Err(NotFun(ty.clone()))
+    }
+}
+
 fn check_type<'a, 'ctx>(
     exp: &'a Exp,
     ty: &'a Type,
@@ -284,10 +291,16 @@ fn check_type<'a, 'ctx>(
     match exp {
         Exp::Lambda(box vars, box body) => check_lambda(vars, body, ty, tcx),
         Exp::Let(box bindings, box body) => check_let(bindings, body, ty, tcx),
+        Exp::Letrec(box bindings, box body) => check_let_rec(bindings, tcx, |tcx| {
+            bindings
+                .iter()
+                .try_for_each(|(_, exp, ty)| check_type(exp, ty, tcx))?;
+            check_type(body, ty, tcx)
+        }),
         Exp::If(box [i, t, e]) => match infer_type(i, tcx)? {
             InferType::Selfify(z3_val, BaseType::Bool) => {
-                check_type(t, ty,&mut *tcx.add_assumption(z3_val.as_bool().unwrap()))?;
-                check_type(e, ty,&mut *tcx.add_assumption(!z3_val.as_bool().unwrap()))
+                check_type(t, ty, &mut *tcx.add_assumption(z3_val.as_bool().unwrap()))?;
+                check_type(e, ty, &mut *tcx.add_assumption(!z3_val.as_bool().unwrap()))
             }
             InferType::Selfify(z3_val, ty) => Err(NotBool(z3_ast_to_type(&z3_val, ty), exp)),
             InferType::Subst(_, _) => Err(NotAnf(exp)),

@@ -42,6 +42,12 @@ pub enum InferType<'a, 'ctx> {
     Selfify(ast::Dynamic<'ctx>, &'a BaseType),
 }
 
+impl<'a, 'ctx> From<&'a Type> for InferType<'a, 'ctx> {
+    fn from(ty: &'a Type) -> Self {
+        InferType::Subst(Subst::default(), ty)
+    }
+}
+
 
 pub fn convert_pred<'ctx>(
     subst: &Subst<'ctx>,
@@ -163,11 +169,11 @@ lazy_static!{
 
 pub fn make_tenv() -> Tenv<'static, 'static> {
     AHashMap::from([
-        ("add".into(), InferType::Subst(Subst::default(), &*ADD_TY)),
-        ("sub".into(), InferType::Subst(Subst::default(), &*SUB_TY)),
-        ("le".into(), InferType::Subst(Subst::default(), &*LE_TY)),
-        ("eq".into(), InferType::Subst(Subst::default(), &*EQ_TY)),
-        ("assert".into(), InferType::Subst(Subst::default(), &*ASSERT_TY))
+        ("add".into(), (&*ADD_TY).into()),
+        ("sub".into(), (&*SUB_TY).into()),
+        ("le".into(), (&*LE_TY).into()),
+        ("eq".into(), (&*EQ_TY).into()),
+        ("assert".into(), (&*ASSERT_TY).into())
     ])
 }
 

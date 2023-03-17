@@ -46,6 +46,20 @@ test_ty_check!{test5,
 test_ty_check!(test6, (as (λ ("x") (if "x" (if "x" #t #f) #t)) (-> "x" (: bool #t) (: bool res))));
 test_ty_check!(test_abs, (as (λ ("x") (if ("le" "x" 0) ("sub" 0 "x") "x")) (-> "x" (: int #t) (: int (<= 0 res)))));
 test_ty_check!(test_let_bound_in_refinement, (as (let (("x" #t)) (as 0 (: int "x"))) (: int #t)));
+test_ty_check!(test_add_slow,
+    (as (letrec
+          (("adds"
+              (λ ("x" "y") (if ("eq" "x" 0) "y" ("adds" ("sub" "x" 1) ("add" 1 "y"))))
+              (-> "x" (: int (<= 0 res)) (-> "y" (: int #t) (: int (= res (+ "x" "y")))))))
+         ("adds" 2 2))
+    (: int (= res 4))));
+test_ty_check!(test_inf_loop,
+    (as (letrec
+          (("ping" (λ ("x") ("pong" "x")) (-> "x" (:bool #t) (: bool #f)))
+           ("pong" (λ ("x") ("ping" "x")) (-> "x" (:bool #t) (: bool #f))))
+         ("ping" #t))
+    (: bool #f)));
+test_ty_check_result!(test_bad_rec, (as (letrec (("bad" #t (: bool #f))) #t) (: bool #f)), Err(NotFun(..)));
 
 fn main() {
     let mut buf = String::new();
@@ -69,7 +83,7 @@ fn main() {
                     Err(e) => eprintln!("{e:?}"),
                 }
             }
-            _ => match from_str(dbg!(&buf)) {
+            _ => match from_str(&buf) {
                 Ok(x) => exp = x,
                 Err(e) => eprintln!("{e:?}"),
             },

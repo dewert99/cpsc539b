@@ -79,6 +79,7 @@ pub enum Exp {
     #[serde(rename(serialize = "as"))]
     Ascribe(Box<(Exp, Type)>),
     Let(Box<[(Ident, Exp)]>, Box<Exp>),
+    Letrec(Box<[(Ident, Exp, Type)]>, Box<Exp>),
     If(Box<[Exp; 3]>),
     #[serde(untagged)]
     App(Box<[Exp]>),

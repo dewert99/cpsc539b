@@ -56,12 +56,12 @@ fn anf_translate_pred(pred: &mut Predicate, var_map: &AHashMap<Ident, Ident>) {
     }
 }
 
-fn anf_translate_ty(ty: &mut Type, var_map: &mut SPHashMap<Ident, Ident>) {
+fn anf_translate_ty(ty: &mut Type, var_map: &AHashMap<Ident, Ident>) {
     match ty {
-        Type::Refined(_, box pred) => anf_translate_pred(pred, &*var_map),
+        Type::Refined(_, box pred) => anf_translate_pred(pred, var_map),
         Type::Fun(box (id, arg_ty, res_ty)) => {
             anf_translate_ty(arg_ty, var_map);
-            anf_translate_ty(res_ty, &mut *var_map.remove_sp(id));
+            anf_translate_ty(res_ty, var_map);
         }
     }
 }
@@ -89,7 +89,7 @@ fn anf_translate_bindings(
             }
         }
         Exp::Ascribe(box (exp, ty)) => {
-            anf_translate_ty(ty, var_map);
+            anf_translate_ty(ty, &* var_map);
             anf_translate_h(exp, var_map)
         },
         exp @ Exp::Let(..) => {
@@ -98,6 +98,13 @@ fn anf_translate_bindings(
             };
             *exp = inner_exp;
             anf_translate_let(&mut *src_bindings, exp, var_map, bindings, fresh)
+        }
+        Exp::Letrec(box bindings, exp) => {
+            bindings.iter_mut().for_each(|(a, exp, ty )| {
+                anf_translate_ty(ty, &*var_map);
+                anf_translate_h(exp, var_map);
+            });
+            anf_translate_h(exp, var_map)
         }
         Exp::If(box [i, t, e]) => {
             anf_translate_bindings(i, var_map, bindings, fresh);
