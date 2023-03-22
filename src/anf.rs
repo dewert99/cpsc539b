@@ -59,7 +59,7 @@ fn anf_translate_pred(pred: &mut Predicate, var_map: &AHashMap<Ident, Ident>) {
 fn anf_translate_ty(ty: &mut Type, var_map: &AHashMap<Ident, Ident>) {
     match ty {
         Type::Refined(_, box pred) => anf_translate_pred(pred, var_map),
-        Type::Fun(box (id, arg_ty, res_ty)) => {
+        Type::Fun(box (_, arg_ty, res_ty)) => {
             anf_translate_ty(arg_ty, var_map);
             anf_translate_ty(res_ty, var_map);
         }
@@ -100,7 +100,7 @@ fn anf_translate_bindings(
             anf_translate_let(&mut *src_bindings, exp, var_map, bindings, fresh)
         }
         Exp::Letrec(box bindings, exp) => {
-            bindings.iter_mut().for_each(|(a, exp, ty )| {
+            bindings.iter_mut().for_each(|(_, exp, ty )| {
                 anf_translate_ty(ty, &*var_map);
                 anf_translate_h(exp, var_map);
             });

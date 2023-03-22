@@ -15,11 +15,13 @@ pub enum TypeError<'a, 'ctx> {
     NotAnf(&'a Exp),
     NotBool(Type, &'a Exp),
     CantInfer(&'a Exp),
-    NotFun(Type),
-    Unbound(Ident),
+    NotFun(&'a Type),
+    TrailingArg(&'a Exp),
+    TrailingParm(&'a Ident),
+    Unbound(&'a Ident),
     PredIllFormed(&'a Type),
-    BinderMismatch(Ident, &'a Type),
-    BadApp,
+    BinderMismatch(&'a Ident, &'a Type),
+    BadApp(&'a Exp),
 }
 
 type PredTy = BaseType;
@@ -180,15 +182,15 @@ pub fn infer_type<'a, 'ctx>(
 ) -> TCResult<'a, 'ctx, InferType<'a, 'ctx>> {
     match exp {
         Exp::Lit(l) => Ok(InferType::Selfify(lit_to_z3(l, tcx.ctx()), &lit_kind(l))),
-        Exp::Var(id) => tcx.tenv.get(id).ok_or(Unbound(id.clone())).cloned(),
-        Exp::App(box []) => Err(BadApp),
+        Exp::Var(id) => tcx.tenv.get(id).ok_or(Unbound(&id)).cloned(),
+        Exp::App(box []) => Err(BadApp(exp)),
         Exp::App(box [f, args @ ..]) => {
             args.iter().fold(infer_type(f, tcx), |f_ty, arg| {
                 match (f_ty?, infer_type(arg, tcx)?) {
                     (
-                        bad @ (InferType::Subst(_, Type::Refined(..)) | InferType::Selfify(..)),
+                        InferType::Subst(_, Type::Refined(..)) | InferType::Selfify(..),
                         _,
-                    ) => Err(NotFun(infer_ty_to_ty(&bad))),
+                    ) => Err(TrailingArg(exp)),
                     // Dependent Fun
                     (
                         InferType::Subst(subst, Type::Fun(box (id, arg_ty, ret_ty))),
@@ -247,10 +249,10 @@ fn check_lambda<'a, 'ctx>(
             if id == id2 {
                 check_lambda(rest, body, ret_ty, &mut *tcx.insert_sp(id, arg_ty.into()))
             } else {
-                Err(BinderMismatch(id.clone(), ty))
+                Err(BinderMismatch(id, ty))
             }
         }
-        (_, Type::Refined(..)) => Err(NotFun(ty.clone())),
+        ([id, ..], Type::Refined(..)) => Err(TrailingParm(id)),
     }
 }
 
@@ -279,7 +281,7 @@ fn check_let_rec<'a, 'ctx>(
         [(id, _, bound_ty@Type::Fun(..)), rest @ ..] => {
             check_let_rec(rest, &mut *tcx.insert_sp(id, bound_ty.into()), then)
         }
-        [(_, _, ty), ..] => Err(NotFun(ty.clone()))
+        [(_, _, ty), ..] => Err(NotFun(&ty))
     }
 }
 
