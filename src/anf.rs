@@ -38,17 +38,13 @@ fn anf_translate_h(exp: &mut Exp, var_map: &mut SPHashMap<Ident, Ident>) {
     }
 }
 
-fn anf_translate_pred(pred: &mut Predicate, var_map: &AHashMap<Ident, Ident>) {
-    let recur = |pred| anf_translate_pred(pred, var_map);
+fn subst_pred(pred: &mut Predicate, var_map: &impl Fn(&Ident) -> Predicate) {
+    let recur = |pred| subst_pred(pred, var_map);
     match pred {
         Predicate::Res | Predicate::Lit(_) => {}
         Predicate::Not(box [x]) => recur(x),
         Predicate::If(box preds) => preds.iter_mut().for_each(recur),
-        Predicate::Var(v) => {
-            if let Some(x) = var_map.get(v) {
-                *v = x.clone()
-            }
-        }
+        Predicate::Var(v) => { *pred = var_map(v) }
         Predicate::Op(box (_, pred1, pred2)) => {
             recur(pred1);
             recur(pred2)
@@ -56,14 +52,20 @@ fn anf_translate_pred(pred: &mut Predicate, var_map: &AHashMap<Ident, Ident>) {
     }
 }
 
-fn anf_translate_ty(ty: &mut Type, var_map: &AHashMap<Ident, Ident>) {
+pub fn subst_ty(ty: &mut Type, var_map: &impl Fn(&Ident) -> Predicate) {
     match ty {
-        Type::Refined(_, box pred) => anf_translate_pred(pred, var_map),
+        Type::Refined(_, box pred) => subst_pred(pred, var_map),
         Type::Fun(box (_, arg_ty, res_ty)) => {
-            anf_translate_ty(arg_ty, var_map);
-            anf_translate_ty(res_ty, var_map);
+            subst_ty(arg_ty, var_map);
+            subst_ty(res_ty, var_map);
         }
+        Type::Forall(box (_, ty)) => subst_ty(ty, var_map),
+        Type::Var(_) => { }
     }
+}
+
+fn anf_translate_ty(ty: &mut Type, var_map: &AHashMap<Ident, Ident>) {
+    subst_ty(ty, &|id| Predicate::Var(var_map.get(id).unwrap_or(id).clone()))
 }
 
 fn anf_translate_bindings(

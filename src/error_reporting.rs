@@ -32,7 +32,7 @@ fn z3_ast_to_pred(z3_ast: &ast::Dynamic) -> Predicate {
 fn apply_subst_pred(pred: &Predicate, subst: &Subst) -> Predicate {
     match pred {
         Predicate::Res | Predicate::Lit(_) => pred.clone(),
-        Predicate::Var(x) => subst.get(x).map(z3_ast_to_pred).unwrap_or(pred.clone()),
+        Predicate::Var(x) => subst.val.get(x).map(z3_ast_to_pred).unwrap_or(pred.clone()),
         Predicate::Op(box (op, pred1, pred2)) => Predicate::Op(Box::new((
             *op,
             apply_subst_pred(pred1, subst),
@@ -47,16 +47,27 @@ fn apply_subst_pred(pred: &Predicate, subst: &Subst) -> Predicate {
     }
 }
 
-pub fn apply_subst(ty: &Type, subst: &Subst) -> Type {
+pub fn apply_subst(ty: &Type, subst: &mut Subst) -> Type {
     match ty {
         Type::Refined(base, box pred) => {
             Type::Refined(base.clone(), Box::new(apply_subst_pred(pred, subst)))
         }
-        Type::Fun(box (id, arg_ty, ret_ty)) => Type::Fun(Box::new((
-            id.clone(),
-            apply_subst(arg_ty, subst),
-            apply_subst(ret_ty, subst),
-        ))),
+        Type::Fun(box (id, arg_ty, ret_ty)) => {
+            let subst = &mut* subst.remove_v(id.clone());
+            Type::Fun(Box::new((
+                id.clone(),
+                apply_subst(arg_ty, subst),
+                apply_subst(ret_ty, subst),
+            )))
+        },
+        Type::Forall(box (id, ty)) => {
+            let subst = &mut* subst.remove_tp(id.clone());
+            Type::Forall(Box::new((
+                id.clone(),
+                apply_subst(ty, subst)
+            )))
+        },
+        Type::Var(id) => subst.ty.get(id).map(|v| Type::Var(format!("{id}${v}").into())).unwrap_or(ty.clone())
     }
 }
 
@@ -66,7 +77,7 @@ pub fn z3_ast_to_type(z3_ast: &ast::Dynamic, base: &BaseType) -> Type {
     Type::Refined(base.clone(), Box::new(pred))
 }
 
-pub fn infer_ty_to_ty(ty: &InferType) -> Type {
+pub fn infer_ty_to_ty(ty: &mut InferType) -> Type {
     match ty {
         InferType::Subst(subst, ty) => apply_subst(ty, subst),
         InferType::Selfify(z3_val, base) => z3_ast_to_type(z3_val, base),

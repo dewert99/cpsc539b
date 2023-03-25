@@ -65,6 +65,11 @@ pub enum Type {
     #[serde(alias = "->")]
     #[serde(rename(serialize = "->"))]
     Fun(Box<(Ident, Type, Type)>),
+    #[serde(alias = "∀")]
+    #[serde(rename(serialize = "∀"))]
+    Forall(Box<(Ident, Type)>),
+    #[serde(untagged)]
+    Var(Ident)
 }
 
 pub use Type::*;
@@ -91,7 +96,7 @@ pub enum Exp {
 
 impl Default for Exp {
     fn default() -> Self {
-        Var(Ident::default())
+        Exp::Var(Ident::default())
     }
 }
 

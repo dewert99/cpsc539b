@@ -1,17 +1,21 @@
+use std::marker::PhantomData;
 use crate::defs::{BaseType, Ident, Lit, Predicate, PrimOp, Type};
 use crate::ty;
-use crate::util::SemiPersistent;
-use crate::util::{Either, SPHashMap};
+use crate::util::{do_revert, inc_dr, map_insert_dr, shift, DoRevert, SemiPersistent, map_remove_dr};
+use crate::util::{Either};
 use ahash::AHashMap;
-use std::ops::{Add, BitAnd, BitOr, DerefMut, Sub};
 use lazy_static::lazy_static;
+use std::ops::{Add, BitAnd, BitOr, DerefMut, Sub};
 use z3::ast::Ast;
 use z3::{ast, Config, Context, Model, SatResult, Solver};
 
 pub type Tenv<'a, 'ctx> = AHashMap<Ident, InferType<'a, 'ctx>>;
+pub type TPenv = AHashMap<Ident, u32>;
 
 pub struct TyCtxBase<'a, 'ctx> {
     pub tenv: AHashMap<Ident, InferType<'a, 'ctx>>,
+    pub tpenv: TPenv,
+    pub tpcount: u32,
     pub solver: Solver<'ctx>,
 }
 
@@ -30,27 +34,89 @@ impl<'a, 'ctx> TyCtxBase<'a, 'ctx> {
         println!("(assert {b})");
         self.solver.assert(b)
     }
+
+    fn tenv(&mut self) -> &mut Tenv<'a, 'ctx> {
+        &mut self.tenv
+    }
+
+    fn tpenv(&mut self) -> &mut TPenv {
+        &mut self.tpenv
+    }
+
+    fn tpcount(&mut self) -> &mut u32 {
+        &mut self.tpcount
+    }
 }
 
 pub type TyCtx<'a, 'ctx> = SemiPersistent<TyCtxBase<'a, 'ctx>>;
 
-pub type Subst<'ctx> = SPHashMap<Ident, ast::Dynamic<'ctx>>;
+pub type InstTy = u32;
+
+#[derive(Clone, Debug)]
+pub struct SubstBase<'a, 'ctx>{
+    pub val: AHashMap<Ident, ast::Dynamic<'ctx>>,
+    pub ty: AHashMap<Ident, InstTy>,
+    phantom: PhantomData<& 'a ()>,
+}
+
+pub type Subst<'a, 'ctx> = SemiPersistent<SubstBase<'a, 'ctx>>;
+
+impl<'a, 'ctx> SubstBase<'a, 'ctx> {
+    fn val(&mut self) -> &mut AHashMap<Ident, ast::Dynamic<'ctx>> {
+        &mut self.val
+    }
+
+    fn ty(&mut self) -> &mut AHashMap<Ident, InstTy> {
+        &mut self.ty
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum InferType<'a, 'ctx> {
-    Subst(Subst<'ctx>, &'a Type),
+    Subst(Subst<'a, 'ctx>, &'a Type),
     Selfify(ast::Dynamic<'ctx>, &'a BaseType),
+}
+
+pub fn new_subst<'a, 'ctx>(tcx: &TyCtxBase<'a, 'ctx>) -> Subst<'a, 'ctx> {
+    let ty = tcx.tpenv.clone();
+    Subst::new(SubstBase{ty, val: AHashMap::default(), phantom: PhantomData})
+}
+
+pub fn empty_subst<'a, 'ctx>() -> Subst<'a, 'ctx> {
+    Subst::new(SubstBase{ty: AHashMap::default(), val: AHashMap::default(), phantom: PhantomData})
+}
+
+impl<'a, 'ctx> Subst<'a, 'ctx> {
+    pub fn insert_v(&mut self, id: Ident, val: ast::Dynamic<'ctx>) -> impl DerefMut<Target=Subst<'a, 'ctx>> + '_ {
+        self.do_and_revert(shift(map_insert_dr(id, val), SubstBase::val))
+    }
+
+    pub fn remove_v(&mut self, id: Ident) -> impl DerefMut<Target=Subst<'a, 'ctx>> + '_ {
+        self.do_and_revert(shift(map_remove_dr(id), SubstBase::val))
+    }
+
+    pub fn insert_tp(&mut self, id: Ident, val: InstTy) -> impl DerefMut<Target=Subst<'a, 'ctx>> + '_ {
+        self.do_and_revert(shift(map_insert_dr(id, val), SubstBase::ty))
+    }
+
+    pub fn remove_tp(&mut self, id: Ident) -> impl DerefMut<Target=Subst<'a, 'ctx>> + '_ {
+        self.do_and_revert(shift(map_remove_dr(id), SubstBase::ty))
+    }
+}
+
+pub fn ty_to_infer<'a, 'ctx>(ty: &'a Type, tcx: &TyCtx<'a, 'ctx>) -> InferType<'a, 'ctx> {
+    InferType::Subst(new_subst(tcx), ty)
 }
 
 impl<'a, 'ctx> From<&'a Type> for InferType<'a, 'ctx> {
     fn from(ty: &'a Type) -> Self {
-        InferType::Subst(Subst::default(), ty)
+        let base = SubstBase{ty: Default::default(), val: Default::default(), phantom: PhantomData};
+        InferType::Subst(Subst::new(base), ty)
     }
 }
 
-
 pub fn convert_pred<'ctx>(
-    subst: &Subst<'ctx>,
+    subst: &Subst<'_, 'ctx>,
     tcx: &TyCtx<'_, 'ctx>,
     pred: &Predicate,
     rsub: &ast::Dynamic<'ctx>,
@@ -59,7 +125,7 @@ pub fn convert_pred<'ctx>(
     let ctx = tcx.ctx();
     match pred {
         Predicate::Res => rsub.clone(),
-        Predicate::Var(x) => subst
+        Predicate::Var(x) => subst.val
             .get(x)
             .cloned()
             .unwrap_or_else(|| match tcx.tenv.get(x) {
@@ -87,6 +153,14 @@ pub fn convert_pred<'ctx>(
     }
 }
 
+fn add_assumption_dr<'a, 'ctx>(assume: ast::Bool<'ctx>) -> impl DoRevert<TyCtxBase<'a, 'ctx>> {
+    do_revert(move |base: &mut TyCtxBase<'a, 'ctx>| {
+        base.push();
+        base.assert(&assume);
+        |base: &mut TyCtxBase<'a, 'ctx>| base.pop()
+    })
+}
+
 impl<'a, 'ctx> TyCtx<'a, 'ctx> {
     pub fn ctx(&self) -> &'ctx Context {
         self.solver.get_context()
@@ -103,16 +177,10 @@ impl<'a, 'ctx> TyCtx<'a, 'ctx> {
         &'b mut self,
         assume: ast::Bool<'ctx>,
     ) -> impl DerefMut<Target = TyCtx<'a, 'ctx>> + 'b {
-        self.do_and_revert(
-            move|data| {
-                data.push();
-                data.assert(&assume);
-            },
-            |_, data| data.pop(),
-        )
+        self.do_and_revert(add_assumption_dr(assume))
     }
 
-    pub fn insert_sp<'b>(
+    pub fn insert<'b>(
         &'b mut self,
         id: &'b Ident,
         ty: InferType<'a, 'ctx>,
@@ -121,32 +189,29 @@ impl<'a, 'ctx> TyCtx<'a, 'ctx> {
             InferType::Subst(subst, Type::Refined(b_ty, box r)) => {
                 let z3_const = self.fresh_const(b_ty, id.as_str());
                 let z3_pred = convert_pred(&subst, self, r, &z3_const).as_bool().unwrap();
-                Either::L(self.do_and_revert(
-                    move |data| {
-                        data.push();
-                        data.assert(&z3_pred);
-                        data.tenv
-                            .insert(id.clone(), InferType::Selfify(z3_const, b_ty))
-                    },
-                    |last_val, data| {
-                        match last_val.take() {
-                            None => data.tenv.remove(id),
-                            Some(val) => data.tenv.insert(id.clone(), val),
-                        };
-                        data.pop();
-                    },
-                ))
+                Either::L(self.do_and_revert((
+                    add_assumption_dr(z3_pred),
+                    shift(
+                        map_insert_dr(id.clone(), InferType::Selfify(z3_const, b_ty)),
+                        TyCtxBase::tenv,
+                    ),
+                )))
             }
-            ty => Either::R(self.do_and_revert(
-                |data| data.tenv.insert(id.clone(), ty),
-                |last_val, data| {
-                    match last_val.take() {
-                        None => data.tenv.remove(id),
-                        Some(val) => data.tenv.insert(id.clone(), val),
-                    };
-                },
-            )),
+            ty => {
+                Either::R(self.do_and_revert(shift(map_insert_dr(id.clone(), ty), TyCtxBase::tenv)))
+            }
         }
+    }
+
+    pub fn insert_tp<'b>(
+        &'b mut self,
+        id: &'b Ident,
+    ) -> impl DerefMut<Target = TyCtx<'a, 'ctx>> + 'b {
+        let n = self.tpcount;
+        self.do_and_revert((
+            shift(inc_dr(), TyCtxBase::tpcount),
+            shift(map_insert_dr(id.clone(), n), TyCtxBase::tpenv),
+        ))
     }
 
     pub fn check(&self, assertion: ast::Bool<'ctx>) -> Result<(), Model<'ctx>> {
@@ -159,11 +224,15 @@ impl<'a, 'ctx> TyCtx<'a, 'ctx> {
     }
 }
 
-lazy_static!{
-    static ref ADD_TY: Type = ty!((-> "x" (: int #t) (fun "y" (: int #t) (: int (= res (+ "x" "y"))))));
-    static ref SUB_TY: Type = ty!((-> "x" (: int #t) (fun "y" (: int #t) (: int (= res (sub "x" "y"))))));
-    static ref LE_TY: Type = ty!((-> "x" (: int #t) (fun "y" (: int #t) (: bool (= res (<= "x" "y"))))));
-    static ref EQ_TY: Type = ty!((-> "x" (: int #t) (fun "y" (: int #t) (: bool (= res (= "x" "y"))))));
+lazy_static! {
+    static ref ADD_TY: Type =
+        ty!((-> "x" (: int #t) (fun "y" (: int #t) (: int (= res (+ "x" "y"))))));
+    static ref SUB_TY: Type =
+        ty!((-> "x" (: int #t) (fun "y" (: int #t) (: int (= res (sub "x" "y"))))));
+    static ref LE_TY: Type =
+        ty!((-> "x" (: int #t) (fun "y" (: int #t) (: bool (= res (<= "x" "y"))))));
+    static ref EQ_TY: Type =
+        ty!((-> "x" (: int #t) (fun "y" (: int #t) (: bool (= res (= "x" "y"))))));
     static ref ASSERT_TY: Type = ty!((-> "x" (: bool res) (: bool res)));
 }
 
@@ -173,7 +242,7 @@ pub fn make_tenv() -> Tenv<'static, 'static> {
         ("sub".into(), (&*SUB_TY).into()),
         ("le".into(), (&*LE_TY).into()),
         ("eq".into(), (&*EQ_TY).into()),
-        ("assert".into(), (&*ASSERT_TY).into())
+        ("assert".into(), (&*ASSERT_TY).into()),
     ])
 }
 
@@ -186,6 +255,10 @@ pub fn make_context() -> Context {
 pub fn make_tcx<'ctx>(context: &'ctx Context) -> TyCtx<'static, 'ctx> {
     let solver = Solver::new(&context);
     let tenv = make_tenv();
-    TyCtx::new(TyCtxBase { solver, tenv })
+    TyCtx::new(TyCtxBase {
+        solver,
+        tenv,
+        tpenv: AHashMap::default(),
+        tpcount: 0,
+    })
 }
-

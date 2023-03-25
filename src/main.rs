@@ -23,7 +23,7 @@ macro_rules! test_ty_check_result {
             anf::anf_translate(&mut exp);
             let ctx = make_context();
             let mut tcx = make_tcx(&ctx);
-            let res = ty_check::infer_type(dbg!(&exp), &mut tcx);
+            let res = dbg!(ty_check::infer_type(dbg!(&exp), &mut tcx).map(|_| ()));
             assert_matches!(res, $expect)
         }
     };
@@ -60,6 +60,29 @@ test_ty_check!(test_inf_loop,
          ("ping" #t))
     (: bool #f)));
 test_ty_check_result!(test_bad_rec, (as (letrec (("bad" #t (: bool #f))) #t) (: bool #f)), Err(NotFun(..)));
+test_ty_check!(poly_id, (as (λ ("x") "x") (forall "X" (-> "x" "X" "X"))));
+test_ty_check_result!(poly_bad, (as (λ ("x" "y") "x") (forall "X" (-> "x" "X" (forall "X" (-> "y" "X" "X"))))),
+    Err(SubType{..}));
+test_ty_check!(poly_fix, (as (as (as (λ ("y" "x") "x") (forall "X" (-> "y" "X" (forall "X" (-> "x" "X" "X")))))
+                            (forall "X" (-> "x" "X" (forall "Y" (-> "y" "Y" "Y")))))
+                           (forall "X" (-> "x" "X" (forall "X" (-> "x" "X" "X"))))));
+test_ty_check!(poly_sub, (as (let (("x" (as (λ ("x") "x") (forall "X" (-> "x" "X" "X"))))) "x") (forall "Y" (-> "y" "Y" "Y"))));
+
+test_ty_check!(test_shadow, ((as (let (("x" (as (λ ("x" "x") "x") (-> "x" (: int #t) (-> "x" (: int #t) (: int (= res "x"))))))) ("x" 0))
+    (-> "x" (: int #t) (: int (= res "x"))))));
+
+test_ty_check_result!(test_shadow_bad, ((as (let (("x" (as (λ ("x" "x") "x") (-> "x" (: int #t) (-> "x" (: int #t) (: int (= res "x"))))))) ("x" 0))
+    (-> "x" (: int #t) (: int (= res 0))))), Err(SubType{..}));
+
+// #[test]
+// fn debug() {
+//     let mut exp = exp!( (as (λ ("x" "y") "x") (forall "X" (-> "x" "X" (forall "X" (-> "y" "X" "X"))))) );
+//     anf::anf_translate(&mut exp);
+//     let ctx = make_context();
+//     let mut tcx = make_tcx(&ctx);
+//     let res = ty_check::infer_type(dbg!(&exp), &mut tcx).map(|_| ());
+//     assert_matches!( res , Ok ( _ ) )
+// }
 
 fn main() {
     let mut buf = String::new();
@@ -71,7 +94,7 @@ fn main() {
         std::io::stdin().read_line(&mut buf).unwrap_or_default();
         match &*buf {
             "anf\n" => anf::anf_translate(&mut exp),
-            "check\n" => println!("{:#?}", ty_check::infer_type(&exp, &mut tyctx())),
+            "check\n" => println!("{:#?}", ty_check::infer_type(&exp, &mut tyctx()).map(|_| ())),
             x if x.trim().chars().all(char::is_numeric) => {
                 let x = x.trim().parse().unwrap();
                 buf.clear();
