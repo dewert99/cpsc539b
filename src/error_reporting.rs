@@ -1,4 +1,4 @@
-use crate::ctxt::{InferType, Subst};
+use crate::ctxt::{InferType, InstTy, Subst};
 use crate::defs::{BaseType, Lit, Predicate, PrimOp, Type};
 use z3::ast::Ast;
 use z3::{ast, AstKind};
@@ -24,7 +24,7 @@ fn z3_ast_to_pred(z3_ast: &ast::Dynamic) -> Predicate {
                     Predicate::Var(orig.into())
                 }
             }
-        },
+        }
         _ => panic!(),
     }
 }
@@ -53,21 +53,22 @@ pub fn apply_subst(ty: &Type, subst: &mut Subst) -> Type {
             Type::Refined(base.clone(), Box::new(apply_subst_pred(pred, subst)))
         }
         Type::Fun(box (id, arg_ty, ret_ty)) => {
-            let subst = &mut* subst.remove_v(id.clone());
+            let subst = &mut *subst.remove_v(id.clone());
             Type::Fun(Box::new((
                 id.clone(),
                 apply_subst(arg_ty, subst),
                 apply_subst(ret_ty, subst),
             )))
-        },
+        }
         Type::Forall(box (id, ty)) => {
-            let subst = &mut* subst.remove_tp(id.clone());
-            Type::Forall(Box::new((
-                id.clone(),
-                apply_subst(ty, subst)
-            )))
+            let subst = &mut *subst.remove_tp(id.clone());
+            Type::Forall(Box::new((id.clone(), apply_subst(ty, subst))))
+        }
+        Type::Var(id) => match subst.ty.get(id) {
+            None => ty.clone(),
+            Some(InstTy::Fresh(id)) => Type::Var(format!("${id}").into()),
+            Some(InstTy::Ty(ty)) => apply_subst(*ty, subst),
         },
-        Type::Var(id) => subst.ty.get(id).map(|v| Type::Var(format!("{id}${v}").into())).unwrap_or(ty.clone())
     }
 }
 

@@ -87,7 +87,6 @@ impl<R: FnMut(&mut T), T> RevertFn<T> for DoRevertBase<R, T> {
     }
 }
 
-
 // impl <D, R> DoRevert<D, R> {
 //     /// Use with caution
 //     /// Requires that `revert` undoes the effect of `d0` when passed it's return value
@@ -113,11 +112,10 @@ impl<T> SemiPersistent<T> {
         this
     }
 
-    pub fn do_and_revert<'a, D: DoRevert<T>>(
-        &'a mut self,
-        dr: D,
-    ) -> Revert<'a, T, D::Revert>
-        where D::Revert: 'a {
+    pub fn do_and_revert<'a, D: DoRevert<T>>(&'a mut self, dr: D) -> Revert<'a, T, D::Revert>
+    where
+        D::Revert: 'a,
+    {
         let rev = dr.d0(&mut self.0);
         Revert {
             data: self,
@@ -181,9 +179,7 @@ pub type SPHashMap<K, V> = SemiPersistent<AHashMap<K, V>>;
 fn replace_dr<T: Default>(val: T) -> impl DoRevert<T> {
     do_revert(|data: &mut T| {
         let mut old_val = mem::replace(data, val);
-        move |data: &mut T| {
-            mem::swap(data, &mut old_val)
-        }
+        move |data: &mut T| mem::swap(data, &mut old_val)
     })
 }
 
@@ -205,10 +201,10 @@ pub fn map_remove_dr<'a, K: Hash + Eq + Clone, V>(key: K) -> impl DoRevert<AHash
         let mut last_val = data.remove(&key);
         move |data: &mut AHashMap<K, V>| {
             match last_val.take() {
-                None => {},
+                None => {}
                 Some(val) => {
                     data.insert(key.clone(), val);
-                },
+                }
             };
         }
     })
@@ -217,16 +213,14 @@ pub fn map_remove_dr<'a, K: Hash + Eq + Clone, V>(key: K) -> impl DoRevert<AHash
 pub fn inc_dr() -> impl DoRevert<u32> {
     do_revert(|data: &mut u32| {
         *data += 1;
-        |data: &mut u32| {*data -= 1;}
+        |data: &mut u32| {
+            *data -= 1;
+        }
     })
 }
 
 impl<'a, K: Hash + Eq + Clone, V> SPHashMap<K, V> {
-    pub fn insert_sp(
-        &mut self,
-        key: K,
-        val: V,
-    ) -> impl DerefMut<Target=SPHashMap<K, V>> + '_ {
+    pub fn insert_sp(&mut self, key: K, val: V) -> impl DerefMut<Target = SPHashMap<K, V>> + '_ {
         self.do_and_revert(map_insert_dr(key, val))
     }
 }

@@ -1,21 +1,24 @@
-use std::marker::PhantomData;
 use crate::defs::{BaseType, Ident, Lit, Predicate, PrimOp, Type};
+use crate::error_reporting::infer_ty_to_ty;
 use crate::ty;
-use crate::util::{do_revert, inc_dr, map_insert_dr, shift, DoRevert, SemiPersistent, map_remove_dr};
-use crate::util::{Either};
+use crate::util::Either;
+use crate::util::{
+    do_revert, inc_dr, map_insert_dr, map_remove_dr, shift, DoRevert, SemiPersistent,
+};
 use ahash::AHashMap;
 use lazy_static::lazy_static;
+use std::fmt::{Debug, Formatter};
 use std::ops::{Add, BitAnd, BitOr, DerefMut, Sub};
 use z3::ast::Ast;
 use z3::{ast, Config, Context, Model, SatResult, Solver};
 
 pub type Tenv<'a, 'ctx> = AHashMap<Ident, InferType<'a, 'ctx>>;
-pub type TPenv = AHashMap<Ident, u32>;
+pub type TPenv = AHashMap<Ident, ()>;
 
 pub struct TyCtxBase<'a, 'ctx> {
     pub tenv: AHashMap<Ident, InferType<'a, 'ctx>>,
     pub tpenv: TPenv,
-    pub tpcount: u32,
+    pub fresh_count: u32,
     pub solver: Solver<'ctx>,
 }
 
@@ -44,19 +47,22 @@ impl<'a, 'ctx> TyCtxBase<'a, 'ctx> {
     }
 
     fn tpcount(&mut self) -> &mut u32 {
-        &mut self.tpcount
+        &mut self.fresh_count
     }
 }
 
 pub type TyCtx<'a, 'ctx> = SemiPersistent<TyCtxBase<'a, 'ctx>>;
 
-pub type InstTy = u32;
+#[derive(Copy, Clone, Debug)]
+pub enum InstTy<'a> {
+    Fresh(u32),
+    Ty(&'a Type),
+}
 
 #[derive(Clone, Debug)]
-pub struct SubstBase<'a, 'ctx>{
+pub struct SubstBase<'a, 'ctx> {
     pub val: AHashMap<Ident, ast::Dynamic<'ctx>>,
-    pub ty: AHashMap<Ident, InstTy>,
-    phantom: PhantomData<& 'a ()>,
+    pub ty: AHashMap<Ident, InstTy<'a>>,
 }
 
 pub type Subst<'a, 'ctx> = SemiPersistent<SubstBase<'a, 'ctx>>;
@@ -66,51 +72,63 @@ impl<'a, 'ctx> SubstBase<'a, 'ctx> {
         &mut self.val
     }
 
-    fn ty(&mut self) -> &mut AHashMap<Ident, InstTy> {
+    fn ty(&mut self) -> &mut AHashMap<Ident, InstTy<'a>> {
         &mut self.ty
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum InferType<'a, 'ctx> {
     Subst(Subst<'a, 'ctx>, &'a Type),
     Selfify(ast::Dynamic<'ctx>, &'a BaseType),
 }
 
-pub fn new_subst<'a, 'ctx>(tcx: &TyCtxBase<'a, 'ctx>) -> Subst<'a, 'ctx> {
-    let ty = tcx.tpenv.clone();
-    Subst::new(SubstBase{ty, val: AHashMap::default(), phantom: PhantomData})
+impl<'a, 'ctx> Debug for InferType<'a, 'ctx> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let ty = infer_ty_to_ty(&mut self.clone());
+        Debug::fmt(&ty, f)
+    }
 }
 
 pub fn empty_subst<'a, 'ctx>() -> Subst<'a, 'ctx> {
-    Subst::new(SubstBase{ty: AHashMap::default(), val: AHashMap::default(), phantom: PhantomData})
+    Subst::new(SubstBase {
+        ty: AHashMap::default(),
+        val: AHashMap::default(),
+    })
 }
 
 impl<'a, 'ctx> Subst<'a, 'ctx> {
-    pub fn insert_v(&mut self, id: Ident, val: ast::Dynamic<'ctx>) -> impl DerefMut<Target=Subst<'a, 'ctx>> + '_ {
+    pub fn insert_v(
+        &mut self,
+        id: Ident,
+        val: ast::Dynamic<'ctx>,
+    ) -> impl DerefMut<Target = Subst<'a, 'ctx>> + '_ {
         self.do_and_revert(shift(map_insert_dr(id, val), SubstBase::val))
     }
 
-    pub fn remove_v(&mut self, id: Ident) -> impl DerefMut<Target=Subst<'a, 'ctx>> + '_ {
+    pub fn remove_v(&mut self, id: Ident) -> impl DerefMut<Target = Subst<'a, 'ctx>> + '_ {
         self.do_and_revert(shift(map_remove_dr(id), SubstBase::val))
     }
 
-    pub fn insert_tp(&mut self, id: Ident, val: InstTy) -> impl DerefMut<Target=Subst<'a, 'ctx>> + '_ {
+    pub fn insert_tp(
+        &mut self,
+        id: Ident,
+        val: InstTy<'a>,
+    ) -> impl DerefMut<Target = Subst<'a, 'ctx>> + '_ {
         self.do_and_revert(shift(map_insert_dr(id, val), SubstBase::ty))
     }
 
-    pub fn remove_tp(&mut self, id: Ident) -> impl DerefMut<Target=Subst<'a, 'ctx>> + '_ {
+    pub fn remove_tp(&mut self, id: Ident) -> impl DerefMut<Target = Subst<'a, 'ctx>> + '_ {
         self.do_and_revert(shift(map_remove_dr(id), SubstBase::ty))
     }
 }
 
-pub fn ty_to_infer<'a, 'ctx>(ty: &'a Type, tcx: &TyCtx<'a, 'ctx>) -> InferType<'a, 'ctx> {
-    InferType::Subst(new_subst(tcx), ty)
-}
-
 impl<'a, 'ctx> From<&'a Type> for InferType<'a, 'ctx> {
     fn from(ty: &'a Type) -> Self {
-        let base = SubstBase{ty: Default::default(), val: Default::default(), phantom: PhantomData};
+        let base = SubstBase {
+            ty: Default::default(),
+            val: Default::default(),
+        };
         InferType::Subst(Subst::new(base), ty)
     }
 }
@@ -125,7 +143,8 @@ pub fn convert_pred<'ctx>(
     let ctx = tcx.ctx();
     match pred {
         Predicate::Res => rsub.clone(),
-        Predicate::Var(x) => subst.val
+        Predicate::Var(x) => subst
+            .val
             .get(x)
             .cloned()
             .unwrap_or_else(|| match tcx.tenv.get(x) {
@@ -207,11 +226,14 @@ impl<'a, 'ctx> TyCtx<'a, 'ctx> {
         &'b mut self,
         id: &'b Ident,
     ) -> impl DerefMut<Target = TyCtx<'a, 'ctx>> + 'b {
-        let n = self.tpcount;
-        self.do_and_revert((
-            shift(inc_dr(), TyCtxBase::tpcount),
-            shift(map_insert_dr(id.clone(), n), TyCtxBase::tpenv),
-        ))
+        self.do_and_revert(shift(map_insert_dr(id.clone(), ()), TyCtxBase::tpenv))
+    }
+
+    pub fn fresh_ty<'b>(
+        &'b mut self,
+    ) -> (InstTy<'static>, impl DerefMut<Target = TyCtx<'a, 'ctx>> + 'b) {
+        let x = InstTy::Fresh(self.fresh_count);
+        (x, self.do_and_revert(shift(inc_dr(), TyCtxBase::tpcount)))
     }
 
     pub fn check(&self, assertion: ast::Bool<'ctx>) -> Result<(), Model<'ctx>> {
@@ -259,6 +281,6 @@ pub fn make_tcx<'ctx>(context: &'ctx Context) -> TyCtx<'static, 'ctx> {
         solver,
         tenv,
         tpenv: AHashMap::default(),
-        tpcount: 0,
+        fresh_count: 0,
     })
 }

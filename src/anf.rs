@@ -44,7 +44,7 @@ fn subst_pred(pred: &mut Predicate, var_map: &impl Fn(&Ident) -> Predicate) {
         Predicate::Res | Predicate::Lit(_) => {}
         Predicate::Not(box [x]) => recur(x),
         Predicate::If(box preds) => preds.iter_mut().for_each(recur),
-        Predicate::Var(v) => { *pred = var_map(v) }
+        Predicate::Var(v) => *pred = var_map(v),
         Predicate::Op(box (_, pred1, pred2)) => {
             recur(pred1);
             recur(pred2)
@@ -60,12 +60,14 @@ pub fn subst_ty(ty: &mut Type, var_map: &impl Fn(&Ident) -> Predicate) {
             subst_ty(res_ty, var_map);
         }
         Type::Forall(box (_, ty)) => subst_ty(ty, var_map),
-        Type::Var(_) => { }
+        Type::Var(_) => {}
     }
 }
 
 fn anf_translate_ty(ty: &mut Type, var_map: &AHashMap<Ident, Ident>) {
-    subst_ty(ty, &|id| Predicate::Var(var_map.get(id).unwrap_or(id).clone()))
+    subst_ty(ty, &|id| {
+        Predicate::Var(var_map.get(id).unwrap_or(id).clone())
+    })
 }
 
 fn anf_translate_bindings(
@@ -82,6 +84,10 @@ fn anf_translate_bindings(
             }
         }
         Exp::Lambda(_, box exp) => anf_translate_h(exp, var_map),
+        Exp::Inst(box exp, box tys) => {
+            anf_translate_bindings(exp, var_map, bindings, fresh);
+            tys.iter_mut().for_each(|ty| anf_translate_ty(ty, var_map))
+        }
         Exp::App(box []) => {}
         Exp::App(box [f, args @ ..]) => {
             anf_translate_bindings(f, var_map, bindings, fresh);
@@ -91,9 +97,9 @@ fn anf_translate_bindings(
             }
         }
         Exp::Ascribe(box (exp, ty)) => {
-            anf_translate_ty(ty, &* var_map);
+            anf_translate_ty(ty, &*var_map);
             anf_translate_h(exp, var_map)
-        },
+        }
         exp @ Exp::Let(..) => {
             let Exp::Let(mut src_bindings, box inner_exp) = mem::take(exp) else {
                 panic!()
@@ -102,7 +108,7 @@ fn anf_translate_bindings(
             anf_translate_let(&mut *src_bindings, exp, var_map, bindings, fresh)
         }
         Exp::Letrec(box bindings, exp) => {
-            bindings.iter_mut().for_each(|(_, exp, ty )| {
+            bindings.iter_mut().for_each(|(_, exp, ty)| {
                 anf_translate_ty(ty, &*var_map);
                 anf_translate_h(exp, var_map);
             });

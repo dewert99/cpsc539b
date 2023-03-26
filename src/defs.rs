@@ -69,7 +69,7 @@ pub enum Type {
     #[serde(rename(serialize = "∀"))]
     Forall(Box<(Ident, Type)>),
     #[serde(untagged)]
-    Var(Ident)
+    Var(Ident),
 }
 
 pub use Type::*;
@@ -86,6 +86,7 @@ pub enum Exp {
     Let(Box<[(Ident, Exp)]>, Box<Exp>),
     Letrec(Box<[(Ident, Exp, Type)]>, Box<Exp>),
     If(Box<[Exp; 3]>),
+    Inst(Box<Exp>, Box<[Type]>),
     #[serde(untagged)]
     App(Box<[Exp]>),
     #[serde(untagged)]
@@ -109,7 +110,9 @@ macro_rules! exp {
 
 #[macro_export]
 macro_rules! ty {
-    ($t:tt) => {serde_lexpr::from_value::<crate::defs::Type>(&lexpr::sexp!($t)).unwrap()}
+    ($t:tt) => {
+        serde_lexpr::from_value::<crate::defs::Type>(&lexpr::sexp!($t)).unwrap()
+    };
 }
 
 pub use Exp::*;
