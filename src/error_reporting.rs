@@ -3,9 +3,9 @@ use crate::defs::{BaseType, Lit, Predicate, PrimOp, Type};
 use z3::ast::Ast;
 use z3::{ast, AstKind};
 
-fn z3_ast_to_pred(z3_ast: &ast::Dynamic) -> Predicate {
-    match z3_ast.kind() {
-        AstKind::Numeral => Predicate::Lit(Lit::Int(
+pub fn z3_ast_to_pred(z3_ast: &ast::Dynamic) -> Predicate {
+    match (z3_ast.kind(), &*z3_ast.children()) {
+        (AstKind::Numeral, _) => Predicate::Lit(Lit::Int(
             z3_ast
                 .as_int()
                 .unwrap()
@@ -14,7 +14,7 @@ fn z3_ast_to_pred(z3_ast: &ast::Dynamic) -> Predicate {
                 .try_into()
                 .unwrap(),
         )),
-        AstKind::App | AstKind::Var => {
+        (AstKind::App | AstKind::Var, []) => {
             let z3_ast_str = z3_ast.to_string();
             match &*z3_ast_str {
                 "true" => Predicate::Lit(Lit::Bool(true)),
@@ -24,6 +24,10 @@ fn z3_ast_to_pred(z3_ast: &ast::Dynamic) -> Predicate {
                     Predicate::Var(orig.into())
                 }
             }
+        }
+        (AstKind::App, [v]) => {
+            assert!(z3_ast.to_string().starts_with("(not"));
+            Predicate::Not(Box::new([z3_ast_to_pred(v)]))
         }
         _ => panic!(),
     }
@@ -66,7 +70,7 @@ pub fn apply_subst(ty: &Type, subst: &mut Subst) -> Type {
         }
         Type::Var(id) => match subst.ty.get(id) {
             None => ty.clone(),
-            Some(InstTy::Fresh(id)) => Type::Var(format!("${id}").into()),
+            Some(InstTy::Fresh(id)) => Type::Var(format!("$T{id}").into()),
             Some(InstTy::Ty(ty)) => apply_subst(*ty, subst),
         },
     }

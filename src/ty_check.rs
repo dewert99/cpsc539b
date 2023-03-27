@@ -1,4 +1,4 @@
-use crate::ctxt::{convert_pred, empty_subst, InferType, InstTy, Subst, Tenv, TyCtx};
+use crate::ctxt::{convert_pred, empty_subst, vprintln, InferType, InstTy, Subst, Tenv, TyCtx};
 use crate::defs::{BaseType, Exp, Ident, Lit, Predicate, PrimOp, Type};
 use crate::error_reporting::{apply_subst, infer_ty_to_ty, z3_ast_to_type};
 use crate::ty_check::TypeError::*;
@@ -84,7 +84,10 @@ fn check_type_well_formed<'a, 'ctx>(
             check_type_well_formed(arg_ty, tcx)?;
             check_type_well_formed(ret_ty, tcx)
         }
-        Type::Forall(box (id, ty)) => check_type_well_formed(ty, &mut *tcx.insert_tp(id)),
+        Type::Forall(box (id, ty2)) => {
+            let mut tcx = tcx.insert_tp(id).map_err(|()| ty)?;
+            check_type_well_formed(ty2, &mut *tcx)
+        }
         Type::Var(id) => {
             if tcx.tpenv.contains_key(id) {
                 Ok(())
@@ -102,9 +105,12 @@ fn check_subtype_val<'a, 'ctx>(
     expect_s: &mut Subst<'a, 'ctx>,
     tcx: &TyCtx<'a, 'ctx>,
 ) -> Result<(), Option<Model<'ctx>>> {
-    let actual_v = z3_ast_to_type(actual, acutal_base);
-    let expect_v = apply_subst(expect, expect_s);
-    eprintln!("checking {actual_v:?} is a subtype of {expect_v:?}");
+    vprintln!(
+        tcx,
+        "checking {:?} is a subtype of {:?}",
+        (z3_ast_to_type(actual, acutal_base)),
+        (apply_subst(expect, expect_s))
+    );
     match expect {
         Type::Refined(base, pred) if acutal_base == base => {
             let pre_cond_check = convert_pred(&expect_s, tcx, pred, actual)
@@ -150,9 +156,12 @@ fn check_subtype_h<'a, 'ctx>(
     expect_s: &mut Subst<'a, 'ctx>,
     tcx: &mut TyCtx<'a, 'ctx>,
 ) -> Result<(), Option<Model<'ctx>>> {
-    let actual_v = apply_subst(actual, actual_s);
-    let expect_v = apply_subst(expect, expect_s);
-    eprintln!("checking {actual_v:?} is a subtype of {expect_v:?}");
+    vprintln!(
+        tcx,
+        "checking {:?} is a subtype of {:?}",
+        (apply_subst(actual, actual_s)),
+        (apply_subst(expect, expect_s))
+    );
     let ae = match (resolve_tp(actual, actual_s), resolve_tp(expect, expect_s)) {
         (InstTy::Fresh(id), InstTy::Fresh(id2)) if id == id2 => return Ok(()),
         (InstTy::Ty(actual), InstTy::Ty(expect)) => (actual, expect),
@@ -213,7 +222,6 @@ fn check_subtype_h<'a, 'ctx>(
         }
         _ => Err(None),
     }?;
-    eprintln!("checked {actual_v:?} is a subtype of {expect_v:?}");
     Ok(())
 }
 
@@ -228,7 +236,7 @@ pub fn infer_type<'a, 'ctx>(
     exp: &'a Exp,
     tcx: &mut TyCtx<'a, 'ctx>,
 ) -> TCResult<'a, 'ctx, InferType<'a, 'ctx>> {
-    eprintln!("inferring type for {exp:?}");
+    vprintln!(tcx, "inferring type for {exp:?}");
     let inf = match exp {
         Exp::Lit(l) => Ok(InferType::Selfify(lit_to_z3(l, tcx.ctx()), &lit_kind(l))),
         Exp::Var(id) => tcx.tenv.get(id).ok_or(Unbound(&id)).cloned(),
@@ -300,7 +308,7 @@ pub fn infer_type<'a, 'ctx>(
         }
         _ => Err(CantInfer(exp)),
     }?;
-    eprintln!("inferred {exp:?} has type {inf:?}");
+    vprintln!(tcx, "inferred {exp:?} has type {inf:?}");
     Ok(inf)
 }
 
@@ -321,11 +329,8 @@ fn check_lambda<'a, 'ctx>(
         }
         ([id, ..], Type::Refined(..) | Type::Var(_)) => Err(TrailingParm(id)),
         (vars, Type::Forall(box (id, ty))) => {
-            if tcx.tpenv.contains_key(id) {
-                Err(ShadowedTypeVar(ty))
-            } else {
-                check_lambda(vars, body, ty, &mut *tcx.insert_tp(id))
-            }
+            let mut tcx = tcx.insert_tp(id).map_err(|()| ShadowedTypeVar(ty))?;
+            check_lambda(vars, body, ty, &mut *tcx)
         }
     }
 }
@@ -364,7 +369,7 @@ fn check_type<'a, 'ctx>(
     ty: &'a Type,
     tcx: &mut TyCtx<'a, 'ctx>,
 ) -> TCResult<'a, 'ctx, ()> {
-    eprintln!("checking {exp:?} has type {ty:?}");
+    vprintln!(tcx, "checking {exp:?} has type {ty:?}");
     match exp {
         Exp::Lambda(box vars, box body) => check_lambda(vars, body, ty, tcx),
         Exp::Let(box bindings, box body) => check_let(bindings, body, ty, tcx),
@@ -392,6 +397,6 @@ fn check_type<'a, 'ctx>(
             })
         }
     }?;
-    eprintln!("checked {exp:?} had type {ty:?}");
+    vprintln!(tcx, "checked {exp:?} had type {ty:?}");
     Ok(())
 }

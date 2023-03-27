@@ -21,7 +21,7 @@ macro_rules! test_ty_check_result {
             let mut exp = exp!($t);
             anf::anf_translate(&mut exp);
             let ctx = make_context();
-            let mut tcx = make_tcx(&ctx);
+            let mut tcx = make_tcx(&ctx, true);
             let res = dbg!(ty_check::infer_type(dbg!(&exp), &mut tcx));
             assert_matches!(res, $expect)
         }
@@ -61,17 +61,27 @@ test_ty_check!(test_inf_loop,
 test_ty_check_result!(test_bad_rec, (as (letrec (("bad" #t (: bool #f))) #t) (: bool #f)), Err(NotFun(..)));
 test_ty_check!(poly_id, (as (λ ("x") "x") (forall "X" (-> "x" "X" "X"))));
 test_ty_check_result!(poly_bad, (as (λ ("x" "y") "x") (forall "X" (-> "x" "X" (forall "X" (-> "y" "X" "X"))))),
-    Err(ShadowedTypeVar(..)));
+    Err(PredIllFormed(..)));
 test_ty_check!(poly_sub, (as (let (("x" (as (λ ("x") "x") (forall "X" (-> "x" "X" "X"))))) "x") (forall "Y" (-> "y" "Y" "Y"))));
 test_ty_check!(poly_sub2, (as (as (λ ("y" "x") "x") (forall "Y" (-> "y" "Y" (forall "X" (-> "x" "X" "X")))))
                             (forall "X" (-> "x" "X" (forall "Y" (-> "y" "Y" "Y"))))));
 test_ty_check!(self_app, (as (λ ("id") ((inst "id" ((forall "X" (-> "x" "X" "X")))) "id")) (-> "id" (forall "X" (-> "x" "X" "X")) (forall "X" (-> "x" "X" "X")))));
 
-test_ty_check!(test_shadow, ((as (let (("x" (as (λ ("x" "x") "x") (-> "x" (: int #t) (-> "x" (: int #t) (: int (= res "x"))))))) ("x" 0))
-    (-> "x" (: int #t) (: int (= res "x"))))));
+test_ty_check!(test_shadow, (as (let (("x" (as (λ ("x" "x") "x") (-> "x" (: int #t) (-> "x" (: int #t) (: int (= res "x"))))))) ("x" 0))
+    (-> "x" (: int #t) (: int (= res "x")))));
 
-test_ty_check_result!(test_shadow_bad, ((as (let (("x" (as (λ ("x" "x") "x") (-> "x" (: int #t) (-> "x" (: int #t) (: int (= res "x"))))))) ("x" 0))
-    (-> "x" (: int #t) (: int (= res 0))))), Err(SubType{..}));
+test_ty_check_result!(test_shadow_bad, (as (let (("x" (as (λ ("x" "x") "x") (-> "x" (: int #t) (-> "x" (: int #t) (: int (= res "x"))))))) ("x" 0))
+    (-> "x" (: int #t) (: int (= res 0)))), Err(SubType{..}));
+
+test_ty_check!(test_dep_pair, (as (λ ("f") ("f" 0 1))
+    (forall "X" (-> "f" (-> "x" (: int #t) (-> "y" (: int (<= "x" res)) "X")) "X"))));
+
+test_ty_check!(test_use_dep_pair, (as
+    ((as (λ ("p") ((inst "p" ((: int (<= res 0)))) "sub"))
+        (-> "p" (forall "X" (-> "f" (-> "x" (: int #t) (-> "y" (: int (<= "x" res)) "X")) "X"))
+            (: int (<= res 0))))
+     (as (λ ("f") ("f" 0 1)) (forall "X" (-> "f" (-> "x" (: int (= res 0)) (-> "y" (: int (= res 1)) "X")) "X"))))
+ (: int (<= res 0))));
 
 // #[test]
 // fn debug() {
@@ -87,13 +97,14 @@ fn main() {
     let mut buf = String::new();
     let mut exp = Exp::default();
     let context = make_context();
-    let tyctx = || make_tcx(&context);
+    let tyctx = |v| make_tcx(&context, v);
     loop {
         println!("{exp:?}");
         std::io::stdin().read_line(&mut buf).unwrap_or_default();
         match &*buf {
             "anf\n" => anf::anf_translate(&mut exp),
-            "check\n" => println!("{:#?}", ty_check::infer_type(&exp, &mut tyctx())),
+            "check\n" => println!("{:#?}", ty_check::infer_type(&exp, &mut tyctx(false))),
+            "vcheck\n" => println!("{:#?}", ty_check::infer_type(&exp, &mut tyctx(true))),
             x if x.trim().chars().all(char::is_numeric) => {
                 let x = x.trim().parse().unwrap();
                 buf.clear();

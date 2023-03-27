@@ -88,9 +88,7 @@ fn anf_translate_bindings(
             anf_translate_bindings(exp, var_map, bindings, fresh);
             tys.iter_mut().for_each(|ty| anf_translate_ty(ty, var_map))
         }
-        Exp::App(box []) => {}
-        Exp::App(box [f, args @ ..]) => {
-            anf_translate_bindings(f, var_map, bindings, fresh);
+        Exp::App(box args) => {
             for arg in args {
                 anf_translate_bindings(arg, var_map, bindings, fresh);
                 lift_to_let(bindings, fresh, arg);

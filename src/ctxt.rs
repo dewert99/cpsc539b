@@ -1,5 +1,5 @@
 use crate::defs::{BaseType, Ident, Lit, Predicate, PrimOp, Type};
-use crate::error_reporting::infer_ty_to_ty;
+use crate::error_reporting::{infer_ty_to_ty, z3_ast_to_pred};
 use crate::ty;
 use crate::util::Either;
 use crate::util::{
@@ -20,21 +20,20 @@ pub struct TyCtxBase<'a, 'ctx> {
     pub tpenv: TPenv,
     pub fresh_count: u32,
     pub solver: Solver<'ctx>,
+    pub verbose: bool,
+    pub tab_count: u32,
 }
 
 impl<'a, 'ctx> TyCtxBase<'a, 'ctx> {
     fn push(&mut self) {
-        println!("(push)");
         self.solver.push();
     }
 
     fn pop(&mut self) {
-        println!("(pop)");
         self.solver.pop(1);
     }
 
     fn assert(&mut self, b: &ast::Bool) {
-        println!("(assert {b})");
         self.solver.assert(b)
     }
 
@@ -180,6 +179,24 @@ fn add_assumption_dr<'a, 'ctx>(assume: ast::Bool<'ctx>) -> impl DoRevert<TyCtxBa
     })
 }
 
+fn tab_dr<'a, 'ctx>() -> impl DoRevert<TyCtxBase<'a, 'ctx>> {
+    fn tab<'a, 'ctx, 'b>(x: &'b mut TyCtxBase<'a, 'ctx>) -> &'b mut u32 {
+        &mut x.tab_count
+    }
+    shift(inc_dr(), tab)
+}
+
+macro_rules! vprintln {
+    ($tcx:expr, $($ts:tt),*) => {
+        if $tcx.verbose {
+            eprint!("{:indent$}", "", indent = ($tcx.tab_count*2) as usize);
+            eprintln!($($ts,)*)
+        }
+    };
+}
+
+pub(crate) use vprintln;
+
 impl<'a, 'ctx> TyCtx<'a, 'ctx> {
     pub fn ctx(&self) -> &'ctx Context {
         self.solver.get_context()
@@ -196,7 +213,15 @@ impl<'a, 'ctx> TyCtx<'a, 'ctx> {
         &'b mut self,
         assume: ast::Bool<'ctx>,
     ) -> impl DerefMut<Target = TyCtx<'a, 'ctx>> + 'b {
-        self.do_and_revert(add_assumption_dr(assume))
+        vprintln!(
+            self,
+            "_: {:?}",
+            (Type::Refined(
+                BaseType::Int,
+                Box::new(z3_ast_to_pred(&assume.clone().into()))
+            ))
+        );
+        self.do_and_revert((add_assumption_dr(assume), tab_dr()))
     }
 
     pub fn insert<'b>(
@@ -204,40 +229,56 @@ impl<'a, 'ctx> TyCtx<'a, 'ctx> {
         id: &'b Ident,
         ty: InferType<'a, 'ctx>,
     ) -> impl DerefMut<Target = TyCtx<'a, 'ctx>> + 'b {
+        vprintln!(self, "{id:?}: {ty:?}");
         match ty {
             InferType::Subst(subst, Type::Refined(b_ty, box r)) => {
                 let z3_const = self.fresh_const(b_ty, id.as_str());
                 let z3_pred = convert_pred(&subst, self, r, &z3_const).as_bool().unwrap();
                 Either::L(self.do_and_revert((
-                    add_assumption_dr(z3_pred),
+                    (tab_dr(), add_assumption_dr(z3_pred)),
                     shift(
                         map_insert_dr(id.clone(), InferType::Selfify(z3_const, b_ty)),
                         TyCtxBase::tenv,
                     ),
                 )))
             }
-            ty => {
-                Either::R(self.do_and_revert(shift(map_insert_dr(id.clone(), ty), TyCtxBase::tenv)))
-            }
+            ty => Either::R(self.do_and_revert((
+                tab_dr(),
+                shift(map_insert_dr(id.clone(), ty), TyCtxBase::tenv),
+            ))),
         }
     }
 
     pub fn insert_tp<'b>(
         &'b mut self,
         id: &'b Ident,
-    ) -> impl DerefMut<Target = TyCtx<'a, 'ctx>> + 'b {
-        self.do_and_revert(shift(map_insert_dr(id.clone(), ()), TyCtxBase::tpenv))
+    ) -> Result<impl DerefMut<Target = TyCtx<'a, 'ctx>> + 'b, ()> {
+        if self.tpenv.contains_key(id) {
+            return Err(());
+        }
+        vprintln!(self, "{id:?}: Type");
+        Ok(self.do_and_revert((
+            tab_dr(),
+            shift(map_insert_dr(id.clone(), ()), TyCtxBase::tpenv),
+        )))
     }
 
     pub fn fresh_ty<'b>(
         &'b mut self,
-    ) -> (InstTy<'static>, impl DerefMut<Target = TyCtx<'a, 'ctx>> + 'b) {
+    ) -> (
+        InstTy<'static>,
+        impl DerefMut<Target = TyCtx<'a, 'ctx>> + 'b,
+    ) {
         let x = InstTy::Fresh(self.fresh_count);
-        (x, self.do_and_revert(shift(inc_dr(), TyCtxBase::tpcount)))
+        vprintln!(self, "$T{}: Type", (self.fresh_count));
+        (
+            x,
+            self.do_and_revert((tab_dr(), shift(inc_dr(), TyCtxBase::tpcount))),
+        )
     }
 
     pub fn check(&self, assertion: ast::Bool<'ctx>) -> Result<(), Model<'ctx>> {
-        println!("(check {assertion})");
+        vprintln!(self, "checking {assertion:?}");
         let assertions = &[!assertion];
         match self.solver.check_assumptions(assertions) {
             SatResult::Unsat => Ok(()),
@@ -274,7 +315,7 @@ pub fn make_context() -> Context {
     Context::new(&config)
 }
 
-pub fn make_tcx<'ctx>(context: &'ctx Context) -> TyCtx<'static, 'ctx> {
+pub fn make_tcx<'ctx>(context: &'ctx Context, verbose: bool) -> TyCtx<'static, 'ctx> {
     let solver = Solver::new(&context);
     let tenv = make_tenv();
     TyCtx::new(TyCtxBase {
@@ -282,5 +323,7 @@ pub fn make_tcx<'ctx>(context: &'ctx Context) -> TyCtx<'static, 'ctx> {
         tenv,
         tpenv: AHashMap::default(),
         fresh_count: 0,
+        tab_count: 0,
+        verbose,
     })
 }
