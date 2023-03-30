@@ -241,54 +241,51 @@ pub fn infer_type<'a, 'ctx>(
         Exp::Lit(l) => Ok(InferType::Selfify(lit_to_z3(l, tcx.ctx()), &lit_kind(l))),
         Exp::Var(id) => tcx.tenv.get(id).ok_or(Unbound(&id)).cloned(),
         Exp::App(box []) => Err(BadApp(exp)),
-        Exp::App(box [f, args @ ..]) => {
-            args.iter().fold(infer_type(f, tcx), |f_ty, arg| {
-                match (f_ty?, infer_type(arg, tcx)?) {
-                    (
-                        InferType::Subst(_, Type::Refined(..) | Type::Var(..))
-                        | InferType::Selfify(..),
-                        _,
-                    ) => Err(TrailingArg(exp)),
-                    (InferType::Subst(mut s, f @ Type::Forall(..)), _) => {
-                        Err(CanApplyForallTo(exp, apply_subst(f, &mut s)))
-                    }
-                    // Dependent Fun
-                    (
-                        InferType::Subst(mut subst, Type::Fun(box (id, arg_ty, ret_ty))),
-                        InferType::Selfify(z3_val, base),
-                    ) => {
-                        check_subtype_val(&z3_val, base, arg_ty, &mut subst, tcx).map_err(
-                            |model| SubType {
-                                model,
-                                exp: arg,
-                                actual: z3_ast_to_type(&z3_val, base),
-                                expected: apply_subst(arg_ty, &mut subst),
-                            },
-                        )?;
-                        let subst = subst.map(|data| {
-                            data.val.insert(id.clone(), z3_val);
-                        });
-                        Ok(InferType::Subst(subst, ret_ty))
-                    }
-                    (_, InferType::Subst(_, Type::Refined(..))) => Err(NotAnf(exp)), // Not in ANF
-                    // Fun
-                    (
-                        InferType::Subst(mut f_subst, Type::Fun(box (_, expect_arg, ret_ty))),
-                        mut actual_arg,
-                    ) => {
-                        check_subtype(&mut actual_arg, expect_arg, &mut f_subst, tcx).map_err(
-                            |model| SubType {
-                                model,
-                                exp: arg,
-                                actual: infer_ty_to_ty(&mut actual_arg),
-                                expected: apply_subst(expect_arg, &mut f_subst),
-                            },
-                        )?;
-                        Ok(InferType::Subst(f_subst, ret_ty))
-                    }
+        Exp::App(box [f, args @ ..]) => args.iter().fold(infer_type(f, tcx), |f_ty, arg| {
+            match (f_ty?, infer_type(arg, tcx)?) {
+                (
+                    InferType::Subst(_, Type::Refined(..) | Type::Var(..)) | InferType::Selfify(..),
+                    _,
+                ) => Err(TrailingArg(exp)),
+                (InferType::Subst(mut s, f @ Type::Forall(..)), _) => {
+                    Err(CanApplyForallTo(exp, apply_subst(f, &mut s)))
                 }
-            })
-        }
+                // Dependent Fun
+                (
+                    InferType::Subst(mut subst, Type::Fun(box (id, arg_ty, ret_ty))),
+                    InferType::Selfify(z3_val, base),
+                ) => {
+                    check_subtype_val(&z3_val, base, arg_ty, &mut subst, tcx).map_err(|model| {
+                        SubType {
+                            model,
+                            exp: arg,
+                            actual: z3_ast_to_type(&z3_val, base),
+                            expected: apply_subst(arg_ty, &mut subst),
+                        }
+                    })?;
+                    let subst = subst.map(|data| {
+                        data.val.insert(id.clone(), z3_val);
+                    });
+                    Ok(InferType::Subst(subst, ret_ty))
+                }
+                (_, InferType::Subst(_, Type::Refined(..))) => Err(NotAnf(exp)), // Not in ANF
+                // Fun
+                (
+                    InferType::Subst(mut f_subst, Type::Fun(box (_, expect_arg, ret_ty))),
+                    mut actual_arg,
+                ) => {
+                    check_subtype(&mut actual_arg, expect_arg, &mut f_subst, tcx).map_err(
+                        |model| SubType {
+                            model,
+                            exp: arg,
+                            actual: infer_ty_to_ty(&mut actual_arg),
+                            expected: apply_subst(expect_arg, &mut f_subst),
+                        },
+                    )?;
+                    Ok(InferType::Subst(f_subst, ret_ty))
+                }
+            }
+        }),
         Exp::Inst(box exp, box tys) => {
             tys.into_iter()
                 .fold(infer_type(exp, tcx), |base_ty, ty| match base_ty? {

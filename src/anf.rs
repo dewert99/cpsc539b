@@ -122,7 +122,7 @@ fn anf_translate_bindings(
 }
 
 fn lift_to_let(bindings: &mut Vec<(Ident, Exp)>, fresh: &mut Fresh, exp: &mut Exp) {
-    if !matches!(exp, Exp::Var(_) | Exp::Lit(_)) {
+    if !matches!(exp, Exp::Var(_) | Exp::Lit(_) | Exp::Lambda(..)) {
         let fresh_var = fresh.fresh();
         let old_arg = mem::replace(exp, Exp::Var(fresh_var.clone()));
         bindings.push((fresh_var, old_arg));
