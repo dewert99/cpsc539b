@@ -1,13 +1,12 @@
 use crate::defs::{BaseType, Ident, Lit, Predicate, PrimOp, Type};
 use crate::error_reporting::{infer_ty_to_ty, z3_ast_to_pred};
 use crate::ty;
-use crate::util::Either;
 use crate::util::{
     do_revert, inc_dr, map_insert_dr, map_remove_dr, shift, DoRevert, SemiPersistent,
 };
 use ahash::AHashMap;
 use lazy_static::lazy_static;
-use std::fmt::{Debug, Formatter};
+use std::fmt::Debug;
 use std::ops::{Add, BitAnd, BitOr, DerefMut, Sub};
 use z3::ast::Ast;
 use z3::{ast, Config, Context, Model, SatResult, Solver};
@@ -77,15 +76,21 @@ impl<'a, 'ctx> SubstBase<'a, 'ctx> {
 }
 
 #[derive(Clone)]
-pub enum InferType<'a, 'ctx> {
-    Subst(Subst<'a, 'ctx>, &'a Type),
+pub enum InferType<'a, 'ctx, S: AsRef<Subst<'a, 'ctx>> + AsMut<Subst<'a, 'ctx>> = Subst<'a, 'ctx>> {
+    Subst(S, &'a Type),
     Selfify(ast::Dynamic<'ctx>, &'a BaseType),
+    Fresh(u32),
 }
 
-impl<'a, 'ctx> Debug for InferType<'a, 'ctx> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let ty = infer_ty_to_ty(&mut self.clone());
-        Debug::fmt(&ty, f)
+pub type BInferType<'a, 'ctx, 'b> = InferType<'a, 'ctx, &'b mut Subst<'a, 'ctx>>;
+
+impl<'a, 'ctx, S: AsRef<Subst<'a, 'ctx>> + AsMut<Subst<'a, 'ctx>>> InferType<'a, 'ctx, S> {
+    pub(crate) fn reborrow(&mut self) -> BInferType<'a, 'ctx, '_> {
+        match self {
+            InferType::Subst(s, data) => BInferType::Subst(s.as_mut(), *data),
+            InferType::Selfify(z3, bty) => BInferType::Selfify(z3.clone(), *bty),
+            InferType::Fresh(id) => BInferType::Fresh(*id),
+        }
     }
 }
 
@@ -171,6 +176,43 @@ pub fn convert_pred<'ctx>(
     }
 }
 
+fn resolve_s<'a, 'ctx, S: AsRef<Subst<'a, 'ctx>> + AsMut<Subst<'a, 'ctx>>>(
+    ty: &'a Type,
+    subst: S,
+    tcx: &TyCtx<'a, 'ctx>,
+    id: &Ident,
+) -> (InferType<'a, 'ctx, S>, ast::Bool<'ctx>) {
+    let z3_true = ast::Bool::from_bool(tcx.ctx(), true);
+    match ty {
+        Type::Var(tid) => match subst.as_ref().ty.get(tid) {
+            None => (InferType::Subst(subst, ty), z3_true),
+            Some(InstTy::Fresh(id)) => (InferType::Fresh(*id), z3_true),
+            Some(InstTy::Ty(ty)) => resolve_s(ty, subst, tcx, id),
+        },
+        Type::Refined(b_ty, box r) => {
+            let z3_const = tcx.fresh_const(b_ty, id.as_str());
+            let z3_pred = convert_pred(subst.as_ref(), tcx, r, &z3_const)
+                .as_bool()
+                .unwrap();
+            (InferType::Selfify(z3_const, b_ty), z3_pred)
+        }
+        _ => (InferType::Subst(subst, ty), z3_true),
+    }
+}
+
+fn resolve<'a, 'ctx, S: AsRef<Subst<'a, 'ctx>> + AsMut<Subst<'a, 'ctx>>>(
+    ty: InferType<'a, 'ctx, S>,
+    tcx: &TyCtx<'a, 'ctx>,
+    id: &Ident,
+) -> (InferType<'a, 'ctx, S>, ast::Bool<'ctx>) {
+    let (mut res0, res1) = match ty {
+        InferType::Subst(subst, ty) => resolve_s(ty, subst, tcx, id),
+        _ => (ty, ast::Bool::from_bool(tcx.ctx(), true)),
+    };
+    vprintln!(tcx, "^~ resolved to {:?}, {:?}", (infer_ty_to_ty(res0.reborrow())), res1);
+    (res0, res1)
+}
+
 fn add_assumption_dr<'a, 'ctx>(assume: ast::Bool<'ctx>) -> impl DoRevert<TyCtxBase<'a, 'ctx>> {
     do_revert(move |base: &mut TyCtxBase<'a, 'ctx>| {
         base.push();
@@ -227,26 +269,30 @@ impl<'a, 'ctx> TyCtx<'a, 'ctx> {
     pub fn insert<'b>(
         &'b mut self,
         id: &'b Ident,
-        ty: InferType<'a, 'ctx>,
+        mut ty: InferType<'a, 'ctx>,
     ) -> impl DerefMut<Target = TyCtx<'a, 'ctx>> + 'b {
-        vprintln!(self, "{id:?}: {ty:?}");
-        match ty {
-            InferType::Subst(subst, Type::Refined(b_ty, box r)) => {
-                let z3_const = self.fresh_const(b_ty, id.as_str());
-                let z3_pred = convert_pred(&subst, self, r, &z3_const).as_bool().unwrap();
-                Either::L(self.do_and_revert((
-                    (tab_dr(), add_assumption_dr(z3_pred)),
-                    shift(
-                        map_insert_dr(id.clone(), InferType::Selfify(z3_const, b_ty)),
-                        TyCtxBase::tenv,
-                    ),
-                )))
-            }
-            ty => Either::R(self.do_and_revert((
-                tab_dr(),
-                shift(map_insert_dr(id.clone(), ty), TyCtxBase::tenv),
-            ))),
-        }
+        vprintln!(self, "{id:?}: {:?}", (infer_ty_to_ty(ty.reborrow())));
+        let (ty, z3_pred) = resolve(ty, self, id);
+        self.do_and_revert((
+            (tab_dr(), add_assumption_dr(z3_pred)),
+            shift(map_insert_dr(id.clone(), ty), TyCtxBase::tenv),
+        ))
+    }
+
+    pub fn insert_dummy<'b, 'c>(
+        &'b mut self,
+        id: &Ident,
+        mut ty: BInferType<'a, 'ctx, 'c>,
+    ) -> (
+        BInferType<'a, 'ctx, 'c>,
+        impl DerefMut<Target = TyCtx<'a, 'ctx>> + 'b,
+    ) {
+        vprintln!(self, "{id:?}: {:?}", (infer_ty_to_ty(ty.reborrow())));
+        let (ty, z3_pred) = resolve(ty, self, id);
+        (
+            ty,
+            self.do_and_revert((tab_dr(), add_assumption_dr(z3_pred))),
+        )
     }
 
     pub fn insert_tp<'b>(

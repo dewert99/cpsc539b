@@ -9,6 +9,18 @@ use std::ops::{Deref, DerefMut};
 /// Methods mutating inner type return a `Revert` handle which reverts the changes when dropped
 pub struct SemiPersistent<T>(T);
 
+impl<T> AsRef<SemiPersistent<T>> for SemiPersistent<T> {
+    fn as_ref(&self) -> &SemiPersistent<T> {
+        self
+    }
+}
+
+impl<T> AsMut<SemiPersistent<T>> for SemiPersistent<T> {
+    fn as_mut(&mut self) -> &mut SemiPersistent<T> {
+        self
+    }
+}
+
 impl<T> Deref for SemiPersistent<T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
@@ -25,7 +37,8 @@ pub trait DoRevert<T> {
 }
 
 pub trait RevertFn<T> {
-    fn revert(&mut self, t: &mut T);
+    type Out;
+    fn revert(&mut self, t: &mut T) -> Self::Out;
 }
 
 impl<T, D1: DoRevert<T>, D2: DoRevert<T>> DoRevert<T> for (D1, D2) {
@@ -37,9 +50,12 @@ impl<T, D1: DoRevert<T>, D2: DoRevert<T>> DoRevert<T> for (D1, D2) {
 }
 
 impl<T, R1: RevertFn<T>, R2: RevertFn<T>> RevertFn<T> for (R1, R2) {
-    fn revert(&mut self, t: &mut T) {
-        self.1.revert(t);
-        self.0.revert(t);
+    type Out = (R1::Out, R2::Out);
+
+    fn revert(&mut self, t: &mut T) -> Self::Out {
+        let x1 = self.1.revert(t);
+        let x0 = self.0.revert(t);
+        (x0, x1)
     }
 }
 
@@ -60,7 +76,9 @@ impl<T, T2, D: DoRevert<T>, F: Fn(&mut T2) -> &mut T> DoRevert<T2> for Shift<D, 
 }
 
 impl<T, T2, R: RevertFn<T>, F: Fn(&mut T2) -> &mut T> RevertFn<T2> for Shift<R, F, T> {
-    fn revert(&mut self, t: &mut T2) {
+    type Out = R::Out;
+
+    fn revert(&mut self, t: &mut T2) -> Self::Out {
         self.0.revert((self.1)(t))
     }
 }
@@ -81,8 +99,10 @@ impl<D: FnOnce(&mut T) -> R, R: FnMut(&mut T), T> DoRevert<T> for DoRevertBase<D
     }
 }
 
-impl<R: FnMut(&mut T), T> RevertFn<T> for DoRevertBase<R, T> {
-    fn revert(&mut self, t: &mut T) {
+impl<R: FnMut(&mut T) -> U, T, U> RevertFn<T> for DoRevertBase<R, T> {
+    type Out = U;
+
+    fn revert(&mut self, t: &mut T) -> Self::Out {
         (self.0)(t)
     }
 }
@@ -170,7 +190,7 @@ impl<'a, T, F: RevertFn<T>> DerefMut for Revert<'a, T, F> {
 
 impl<'a, T, F: RevertFn<T>> Drop for Revert<'a, T, F> {
     fn drop(&mut self) {
-        self.revert.revert(&mut self.data.0)
+        self.revert.revert(&mut self.data.0);
     }
 }
 

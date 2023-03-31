@@ -1,4 +1,6 @@
-use crate::ctxt::{convert_pred, empty_subst, vprintln, InferType, InstTy, Subst, Tenv, TyCtx};
+use crate::ctxt::{
+    convert_pred, empty_subst, vprintln, BInferType, InferType, InstTy, Subst, Tenv, TyCtx,
+};
 use crate::defs::{BaseType, Exp, Ident, Lit, Predicate, PrimOp, Type};
 use crate::error_reporting::{apply_subst, infer_ty_to_ty, z3_ast_to_type};
 use crate::ty_check::TypeError::*;
@@ -100,52 +102,89 @@ fn check_type_well_formed<'a, 'ctx>(
 
 fn check_subtype_val<'a, 'ctx>(
     actual: &ast::Dynamic<'ctx>,
-    acutal_base: &BaseType,
-    expect: &'a Type,
-    expect_s: &mut Subst<'a, 'ctx>,
-    tcx: &TyCtx<'a, 'ctx>,
-) -> Result<(), Option<Model<'ctx>>> {
-    vprintln!(
-        tcx,
-        "checking {:?} is a subtype of {:?}",
-        (z3_ast_to_type(actual, acutal_base)),
-        (apply_subst(expect, expect_s))
-    );
-    match expect {
-        Type::Refined(base, pred) if acutal_base == base => {
-            let pre_cond_check = convert_pred(&expect_s, tcx, pred, actual)
-                .as_bool()
-                .unwrap();
-            tcx.check(pre_cond_check).map_err(Some)
-        }
-        _ => Err(None),
-    }
-}
-
-fn check_subtype<'a, 'ctx>(
-    actual: &mut InferType<'a, 'ctx>,
+    acutal_base: &'a BaseType,
     expect: &'a Type,
     expect_s: &mut Subst<'a, 'ctx>,
     tcx: &mut TyCtx<'a, 'ctx>,
 ) -> Result<(), Option<Model<'ctx>>> {
-    match actual {
-        InferType::Selfify(actual, actual_base) => {
-            check_subtype_val(actual, actual_base, expect, expect_s, tcx)
-        }
-        InferType::Subst(actual_s, actual) => {
-            check_subtype_h(actual, actual_s, expect, expect_s, tcx)
-        }
-    }
+    check_subtype(
+        BInferType::Selfify(actual.clone(), acutal_base),
+        expect,
+        expect_s,
+        tcx,
+    )
 }
 
-fn resolve_tp<'a, 'ctx>(ty: &'a Type, subst: &Subst<'a, 'ctx>) -> InstTy<'a> {
-    match ty {
-        Type::Var(id) => match subst.ty.get(id) {
-            None => InstTy::Ty(ty),
-            Some(InstTy::Fresh(id)) => InstTy::Fresh(*id),
-            Some(InstTy::Ty(ty)) => resolve_tp(*ty, subst),
-        },
-        _ => InstTy::Ty(ty),
+fn check_subtype<'a, 'ctx>(
+    mut actual: BInferType<'a, 'ctx, '_>,
+    expect: &'a Type,
+    expect_s: &mut Subst<'a, 'ctx>,
+    tcx: &mut TyCtx<'a, 'ctx>,
+) -> Result<(), Option<Model<'ctx>>> {
+    vprintln!(
+        tcx,
+        "checking {:?} is a subtype of {:?}",
+        (infer_ty_to_ty(actual.reborrow())),
+        (apply_subst(expect, expect_s))
+    );
+    let (actual, mut tcx) = tcx.insert_dummy(&"_".into(), actual);
+    let tcx = &mut *tcx;
+    let expect = match expect {
+        Type::Var(v) => expect_s.ty.get(v).copied().unwrap_or(InstTy::Ty(expect)),
+        _ => InstTy::Ty(expect),
+    };
+    match (actual, expect) {
+        (InferType::Fresh(id1), InstTy::Fresh(id2)) => {
+            if id1 == id2 {
+                Ok(())
+            } else {
+                Err(None)
+            }
+        }
+        (InferType::Selfify(actual, actual_base), InstTy::Ty(Type::Refined(base, box pred))) => {
+            if actual_base != base {
+                Err(None)
+            } else {
+                let pre_cond_check = convert_pred(&expect_s, tcx, pred, &actual)
+                    .as_bool()
+                    .unwrap();
+                tcx.check(pre_cond_check).map_err(Some)
+            }
+        }
+        (
+            InferType::Subst(actual_s, Type::Fun(box (actual_id, actual_arg, actual_res))),
+            InstTy::Ty(Type::Fun(box (expect_id, expect_arg, expect_res))),
+        ) => {
+            let (mut expect_arg, mut tcx) =
+                tcx.insert_dummy(expect_id, BInferType::Subst(expect_s, expect_arg));
+            let tcx = &mut *tcx;
+            check_subtype(expect_arg.reborrow(), actual_arg, actual_s, tcx)?;
+            match expect_arg {
+                InferType::Selfify(z3_var, _) => {
+                    let actual_s = &mut *actual_s.insert_v(actual_id.clone(), z3_var.clone());
+                    let expect_s = &mut *expect_s.insert_v(expect_id.clone(), z3_var);
+                    check_subtype_h(actual_res, actual_s, expect_res, expect_s, tcx)
+                }
+                _ => check_subtype_h(actual_res, actual_s, expect_res, expect_s, tcx),
+            }
+        }
+        (
+            InferType::Subst(actual_s, Type::Forall(box (actual_id, actual))),
+            InstTy::Ty(Type::Forall(box (expect_id, expect))),
+        ) => {
+            let (fresh, mut tcx) = tcx.fresh_ty();
+            let actual_s = &mut *actual_s.insert_tp(actual_id.clone(), fresh);
+            let expect_s = &mut *expect_s.insert_tp(expect_id.clone(), fresh);
+            check_subtype_h(actual, actual_s, expect, expect_s, &mut *tcx)
+        }
+        (InferType::Subst(_, Type::Var(id1)), InstTy::Ty(Type::Var(id2))) => {
+            if id1 == id2 {
+                Ok(())
+            } else {
+                Err(None)
+            }
+        }
+        _ => Err(None),
     }
 }
 
@@ -156,73 +195,7 @@ fn check_subtype_h<'a, 'ctx>(
     expect_s: &mut Subst<'a, 'ctx>,
     tcx: &mut TyCtx<'a, 'ctx>,
 ) -> Result<(), Option<Model<'ctx>>> {
-    vprintln!(
-        tcx,
-        "checking {:?} is a subtype of {:?}",
-        (apply_subst(actual, actual_s)),
-        (apply_subst(expect, expect_s))
-    );
-    let ae = match (resolve_tp(actual, actual_s), resolve_tp(expect, expect_s)) {
-        (InstTy::Fresh(id), InstTy::Fresh(id2)) if id == id2 => return Ok(()),
-        (InstTy::Ty(actual), InstTy::Ty(expect)) => (actual, expect),
-        _ => return Err(None),
-    };
-    match ae {
-        (Type::Var(id1), Type::Var(id2)) => {
-            if id1 == id2 {
-                Ok(())
-            } else {
-                Err(None)
-            }
-        }
-        (Type::Refined(actual_base, actual_pred), Type::Refined(expect_base, expect_pred))
-            if actual_base == expect_base =>
-        {
-            let fresh_const = tcx.fresh_const(actual_base, "res");
-            let actual_pred = convert_pred(actual_s, tcx, actual_pred, &fresh_const)
-                .as_bool()
-                .unwrap();
-            let expect_pred = convert_pred(expect_s, tcx, expect_pred, &fresh_const)
-                .as_bool()
-                .unwrap();
-            tcx.check(ast::Bool::implies(&actual_pred, &expect_pred))
-                .map_err(Some)
-        }
-        // Dependent Fun
-        (
-            Type::Fun(box (actual_id, actual_in, actual_out)),
-            Type::Fun(box (expect_id, expect_in @ Type::Refined(expected_in_base, _), expect_out)),
-        ) => {
-            let new_tcx =
-                &mut *tcx.insert(expect_id, InferType::Subst(expect_s.clone(), expect_in));
-            let Some(InferType::Selfify(expected_in_val, _)) = new_tcx.tenv.get(expect_id) else {
-                unreachable!()
-            };
-            check_subtype_val(
-                expected_in_val,
-                &expected_in_base,
-                actual_in,
-                actual_s,
-                new_tcx,
-            )?;
-            let actual_s = &mut *actual_s.insert_v(actual_id.clone(), expected_in_val.clone());
-            let expect_s = &mut *expect_s.insert_v(expect_id.clone(), expected_in_val.clone());
-            check_subtype_h(actual_out, actual_s, expect_out, expect_s, new_tcx)
-        }
-        // Fun
-        (Type::Fun(box (_, actual_in, actual_out)), Type::Fun(box (_, expect_in, expect_out))) => {
-            check_subtype_h(expect_in, expect_s, actual_in, actual_s, tcx)?;
-            check_subtype_h(actual_out, actual_s, expect_out, expect_s, tcx)
-        }
-        (Type::Forall(box (actual_id, actual_ty)), Type::Forall(box (expect_id, expect_ty))) => {
-            let (fresh, mut new_tcx) = tcx.fresh_ty();
-            let actual_s = &mut *actual_s.insert_tp(actual_id.clone(), fresh);
-            let expect_s = &mut *expect_s.insert_tp(expect_id.clone(), fresh);
-            check_subtype_h(actual_ty, actual_s, expect_ty, expect_s, &mut *new_tcx)
-        }
-        _ => Err(None),
-    }?;
-    Ok(())
+    check_subtype(BInferType::Subst(actual_s, actual), expect, expect_s, tcx)
 }
 
 fn lit_to_z3<'ctx>(l: &Lit, ctx: &'ctx Context) -> ast::Dynamic<'ctx> {
@@ -232,19 +205,21 @@ fn lit_to_z3<'ctx>(l: &Lit, ctx: &'ctx Context) -> ast::Dynamic<'ctx> {
     }
 }
 
-pub fn infer_type<'a, 'ctx>(
+fn infer_type<'a, 'ctx>(
     exp: &'a Exp,
     tcx: &mut TyCtx<'a, 'ctx>,
 ) -> TCResult<'a, 'ctx, InferType<'a, 'ctx>> {
     vprintln!(tcx, "inferring type for {exp:?}");
-    let inf = match exp {
+    let mut inf = match exp {
         Exp::Lit(l) => Ok(InferType::Selfify(lit_to_z3(l, tcx.ctx()), &lit_kind(l))),
         Exp::Var(id) => tcx.tenv.get(id).ok_or(Unbound(&id)).cloned(),
         Exp::App(box []) => Err(BadApp(exp)),
         Exp::App(box [f, args @ ..]) => args.iter().fold(infer_type(f, tcx), |f_ty, arg| {
             match (f_ty?, infer_type(arg, tcx)?) {
                 (
-                    InferType::Subst(_, Type::Refined(..) | Type::Var(..)) | InferType::Selfify(..),
+                    InferType::Subst(_, Type::Refined(..) | Type::Var(..))
+                    | InferType::Selfify(..)
+                    | InferType::Fresh(..),
                     _,
                 ) => Err(TrailingArg(exp)),
                 (InferType::Subst(mut s, f @ Type::Forall(..)), _) => {
@@ -274,11 +249,11 @@ pub fn infer_type<'a, 'ctx>(
                     InferType::Subst(mut f_subst, Type::Fun(box (_, expect_arg, ret_ty))),
                     mut actual_arg,
                 ) => {
-                    check_subtype(&mut actual_arg, expect_arg, &mut f_subst, tcx).map_err(
+                    check_subtype(actual_arg.reborrow(), expect_arg, &mut f_subst, tcx).map_err(
                         |model| SubType {
                             model,
                             exp: arg,
-                            actual: infer_ty_to_ty(&mut actual_arg),
+                            actual: infer_ty_to_ty(actual_arg.reborrow()),
                             expected: apply_subst(expect_arg, &mut f_subst),
                         },
                     )?;
@@ -305,7 +280,11 @@ pub fn infer_type<'a, 'ctx>(
         }
         _ => Err(CantInfer(exp)),
     }?;
-    vprintln!(tcx, "inferred {exp:?} has type {inf:?}");
+    vprintln!(
+        tcx,
+        "inferred {exp:?} has type {:?}",
+        (infer_ty_to_ty(inf.reborrow()))
+    );
     Ok(inf)
 }
 
@@ -382,12 +361,12 @@ fn check_type<'a, 'ctx>(
                 check_type(e, ty, &mut *tcx.add_assumption(!z3_val.as_bool().unwrap()))
             }
             InferType::Selfify(z3_val, ty) => Err(NotBool(z3_ast_to_type(&z3_val, ty), exp)),
-            InferType::Subst(_, _) => Err(NotAnf(exp)),
+            _ => Err(NotAnf(exp)),
         },
         _ => {
             let mut inf_ty = infer_type(exp, tcx)?;
-            check_subtype(&mut inf_ty, ty, &mut empty_subst(), tcx).map_err(|model| SubType {
-                actual: infer_ty_to_ty(&mut inf_ty),
+            check_subtype(inf_ty.reborrow(), ty, &mut empty_subst(), tcx).map_err(|model| SubType {
+                actual: infer_ty_to_ty(inf_ty.reborrow()),
                 expected: ty.clone(),
                 exp,
                 model,
@@ -396,4 +375,8 @@ fn check_type<'a, 'ctx>(
     }?;
     vprintln!(tcx, "checked {exp:?} had type {ty:?}");
     Ok(())
+}
+
+pub fn type_check<'a, 'ctx>(exp: &'a Exp, tcx: &mut TyCtx<'a, 'ctx>) -> TCResult<'a, 'ctx, ()> {
+    infer_type(exp, tcx).map(|_| ())
 }

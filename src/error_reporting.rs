@@ -1,4 +1,4 @@
-use crate::ctxt::{InferType, InstTy, Subst};
+use crate::ctxt::{BInferType, InferType, InstTy, Subst};
 use crate::defs::{BaseType, Lit, Predicate, PrimOp, Type};
 use z3::ast::Ast;
 use z3::{ast, AstKind};
@@ -82,9 +82,10 @@ pub fn z3_ast_to_type(z3_ast: &ast::Dynamic, base: &BaseType) -> Type {
     Type::Refined(base.clone(), Box::new(pred))
 }
 
-pub fn infer_ty_to_ty(ty: &mut InferType) -> Type {
+pub fn infer_ty_to_ty(ty: BInferType<'_, '_, '_>) -> Type {
     match ty {
         InferType::Subst(subst, ty) => apply_subst(ty, subst),
-        InferType::Selfify(z3_val, base) => z3_ast_to_type(z3_val, base),
+        InferType::Selfify(z3_val, base) => z3_ast_to_type(&z3_val, base),
+        InferType::Fresh(id) => Type::Var(format!("$T{id}").into()),
     }
 }

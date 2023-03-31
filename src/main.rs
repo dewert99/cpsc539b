@@ -22,7 +22,7 @@ macro_rules! test_ty_check_result {
             anf::anf_translate(&mut exp);
             let ctx = make_context();
             let mut tcx = make_tcx(&ctx, true);
-            let res = dbg!(ty_check::infer_type(dbg!(&exp), &mut tcx));
+            let res = dbg!(ty_check::type_check(dbg!(&exp), &mut tcx));
             assert_matches!(res, $expect)
         }
     };
@@ -34,8 +34,8 @@ macro_rules! test_ty_check {
     };
 }
 
-test_ty_check! {test1, (as ("add" 1) (-> "y" (: int #t) (: int (<= "y" res))))}
-test_ty_check_result! {test2, (as ("add" ("add" 1 1)) (-> "y" (: int #t) (: int (<= res "y")))), Err(SubType{..})}
+test_ty_check! {test1, (as ("add" 1) (-> "z" (: int #t) (: int (<= "z" res))))}
+test_ty_check_result! {test2, (as ("add" ("add" 1 1)) (-> "z" (: int #t) (: int (<= res "z")))), Err(SubType{..})}
 test_ty_check! {test3, (as (λ ("f" "x") ("f" ("f" "x"))) (-> "f" (-> "x" (: int #t) (: int (<= "x" res))) (-> "x" (: int #t) (: int (<= "x" res)))))}
 test_ty_check! {test4, (as (λ ("f" "x") ("f" ("f" "x"))) (-> "f" (-> "x" (: int (<= 0 res)) (: int (<= "x" res))) (-> "x" (: int (<= 0 res)) (: int (<= "x" res)))))}
 test_ty_check! {test5,
@@ -83,6 +83,11 @@ test_ty_check!(test_use_dep_pair, (as
      (as (λ ("f") ("f" 0 1)) (forall "X" (-> "f" (-> "x" (: int (= res 0)) (-> "y" (: int (= res 1)) "X")) "X"))))
  (: int (<= res 0))));
 
+test_ty_check!(test_bind_inst,
+    (as (let (("id" (as (λ ("x") "x") (forall "X" (-> "x" "X" "X"))))
+              ("one" ((inst "id" ((: int (= res 1)))) 1)))
+          "one") (: int (= res 1))));
+
 // #[test]
 // fn debug() {
 //     let mut exp = exp!( (as (λ ("x" "y") "x") (forall "X" (-> "x" "X" (forall "X" (-> "y" "X" "X"))))) );
@@ -103,8 +108,8 @@ fn main() {
         std::io::stdin().read_line(&mut buf).unwrap_or_default();
         match &*buf {
             "anf\n" => anf::anf_translate(&mut exp),
-            "check\n" => println!("{:#?}", ty_check::infer_type(&exp, &mut tyctx(false))),
-            "vcheck\n" => println!("{:#?}", ty_check::infer_type(&exp, &mut tyctx(true))),
+            "check\n" => println!("{:#?}", ty_check::type_check(&exp, &mut tyctx(false))),
+            "vcheck\n" => println!("{:#?}", ty_check::type_check(&exp, &mut tyctx(true))),
             x if x.trim().chars().all(char::is_numeric) => {
                 let x = x.trim().parse().unwrap();
                 buf.clear();
