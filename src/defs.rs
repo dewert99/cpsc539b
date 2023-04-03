@@ -118,3 +118,15 @@ macro_rules! ty {
 }
 
 pub use Exp::*;
+
+#[derive(Serialize, Deserialize, Clone)]
+pub enum Command {
+    #[serde(rename = "check")]
+    Check,
+    #[serde(rename = "vcheck")]
+    VCheck,
+    #[serde(rename = "anf")]
+    ANF,
+    #[serde(untagged)]
+    Exp(Exp)
+}

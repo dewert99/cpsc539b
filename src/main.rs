@@ -10,9 +10,11 @@ mod util;
 
 use crate::ctxt::{make_context, make_tcx};
 use defs::Exp;
-use serde_lexpr::from_str;
 use std::assert_matches::assert_matches;
-use ty_check::TypeError::*;
+use std::io::stdin;
+use defs::Command::*;
+use crate::anf::anf_translate;
+use crate::ty_check::type_check;
 
 macro_rules! test_ty_check_result {
     ($name:ident, $t:tt, $expect:pat) => {
@@ -102,6 +104,16 @@ test_ty_check!(test_sum2, (as (let (
     ("r2" ((inst "s2" ((: int (= res -5)))) (as (λ ("l") 10) (-> "l" (: (-> "x" int int) #f) (: int (= res (sub 0 5))))) (as (λ ("l") ("l" 5)) (-> "l" (-> "x" int (: int (= res (sub 0 "x")))) (: int (= res (sub 0 5)))))))
 ) ("add" "r1" "r2")) (: int (= res 1))));
 
+test_ty_check!(test_sum2b, (as (let (
+    ("mk_sum" (as (λ ("b" "l" "r" "f" "g") (if "b" ("f" "l") ("g" "r")))
+        (forall "X" (forall "Y" (-> "b" bool (-> "l" "X" (-> "r" "Y" (forall "Z" (-> "f" (-> "x" (: "X" "b") "Z") (-> "g" (-> "y" (: "Y" (! "b")) "Z") "Z"))))))))))
+    ("mk_sum_i" (inst "mk_sum" ((-> "x" int (: int (= res (+ "x" 1)))) (-> "x" int (: int (= res (sub 0 "x")))))))
+    ("s1" ("mk_sum_i" #t ("add" 1) ("sub" 0)))
+    ("s2" ("mk_sum_i" #f ("add" 1) ("sub" 0)))
+    ("r1" ((inst "s1" ((: int (= res 6)))) (λ ("x") ("x" 5)) (λ ("y") ("y" 5))))
+    ("r2" ((inst "s2" ((: int (= res -5)))) (λ ("x") 10) (λ ("y") ("y" 5))))
+) ("add" "r1" "r2")) (: int (= res 1))));
+
 // #[test]
 // fn debug() {
 //     let mut exp = exp!( (as (λ ("x" "y") "x") (forall "X" (-> "x" "X" (forall "X" (-> "y" "X" "X"))))) );
@@ -119,26 +131,16 @@ fn main() {
     let tyctx = |v| make_tcx(&context, v);
     loop {
         println!("{exp:?}");
-        std::io::stdin().read_line(&mut buf).unwrap_or_default();
-        match &*buf {
-            "anf\n" => anf::anf_translate(&mut exp),
-            "check\n" => println!("{:#?}", ty_check::type_check(&exp, &mut tyctx(false))),
-            "vcheck\n" => println!("{:#?}", ty_check::type_check(&exp, &mut tyctx(true))),
-            x if x.trim().chars().all(char::is_numeric) => {
-                let x = x.trim().parse().unwrap();
-                buf.clear();
-                for _ in 0..x {
-                    std::io::stdin().read_line(&mut buf).unwrap_or_default();
-                }
-                match from_str(&buf) {
-                    Ok(x) => exp = x,
-                    Err(e) => eprintln!("{e:?}"),
-                }
+        // std::io::stdin().read_line(&mut buf).unwrap_or_default();
+        match lexpr::Parser::from_reader(stdin()).expect_value() {
+            Ok(v) => match serde_lexpr::from_value(&v) {
+                Ok(Check) => eprintln!("{:?}", type_check(&exp, &mut tyctx(false))),
+                Ok(VCheck) => eprintln!("{:?}", type_check(&exp, &mut tyctx(true))),
+                Ok(ANF) => anf_translate(&mut exp),
+                Ok(Exp(new_exp)) => exp = new_exp,
+                Err(err) => eprintln!("{err}")
             }
-            _ => match from_str(&buf) {
-                Ok(x) => exp = x,
-                Err(e) => eprintln!("{e:?}"),
-            },
+            Err(err) =>  eprintln!("{err}")
         }
         buf.clear()
     }
