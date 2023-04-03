@@ -101,21 +101,6 @@ fn check_type_well_formed<'a, 'ctx>(
     }
 }
 
-fn check_subtype_val<'a, 'ctx>(
-    actual: &ast::Dynamic<'ctx>,
-    acutal_base: &'a BaseType,
-    expect: &'a Type,
-    expect_s: &mut Subst<'a, 'ctx>,
-    tcx: &mut TyCtx<'a, 'ctx>,
-) -> Result<(), Option<Model<'ctx>>> {
-    check_subtype(
-        BInferType::Selfify(actual.clone(), acutal_base),
-        expect,
-        expect_s,
-        tcx,
-    )
-}
-
 fn check_subtype<'a, 'ctx>(
     mut actual: BInferType<'a, 'ctx, '_>,
     expect: &'a Type,
@@ -227,50 +212,38 @@ fn infer_type<'a, 'ctx>(
         Exp::Var(id) => tcx.tenv.get(id).ok_or(Unbound(&id)).cloned(),
         Exp::App(box []) => Err(BadApp(exp)),
         Exp::App(box [f, args @ ..]) => args.iter().fold(infer_type(f, tcx), |f_ty, arg| {
-            match (f_ty?, infer_type(arg, tcx)?) {
-                (
-                    InferType::Subst(_, Type::Var(..) | Type::Base(..))
-                    | InferType::Selfify(..)
-                    | InferType::Fresh(..),
-                    _,
-                ) => Err(TrailingArg(exp)),
-                (InferType::Subst(_, Type::Refined(..)), _) => Err(NotAnf(exp)),
-                (InferType::Subst(mut s, f @ Type::Forall(..)), _) => {
+            match f_ty? {
+                InferType::Subst(_, Type::Var(..) | Type::Base(..))
+                | InferType::Selfify(..)
+                | InferType::Fresh(..) => Err(TrailingArg(exp)),
+                InferType::Subst(_, Type::Refined(..)) => Err(NotAnf(exp)),
+                InferType::Subst(mut s, f @ Type::Forall(..)) => {
                     Err(CanApplyForallTo(exp, apply_subst(f, &mut s)))
                 }
-                // Dependent Fun
-                (
-                    InferType::Subst(mut subst, Type::Fun(box (id, arg_ty, ret_ty))),
-                    InferType::Selfify(z3_val, base),
-                ) => {
-                    check_subtype_val(&z3_val, base, arg_ty, &mut subst, tcx).map_err(|model| {
-                        SubType {
-                            model,
-                            exp: arg,
-                            actual: z3_ast_to_type(&z3_val, base),
-                            expected: apply_subst(arg_ty, &mut subst),
-                        }
-                    })?;
-                    let subst = subst.map(|data| {
-                        data.val.insert(id.clone(), z3_val);
-                    });
-                    Ok(InferType::Subst(subst, ret_ty))
-                }
-                (_, InferType::Subst(_, Type::Refined(..))) => Err(NotAnf(exp)), // Not in ANF
-                // Fun
-                (
-                    InferType::Subst(mut f_subst, Type::Fun(box (_, expect_arg, ret_ty))),
-                    mut actual_arg,
-                ) => {
-                    check_subtype(actual_arg.reborrow(), expect_arg, &mut f_subst, tcx).map_err(
+                InferType::Subst(mut subst, Type::Fun(box (id, arg_ty, ret_ty))) => {
+                    if let Exp::Lambda(box [_, ..], ..) = arg {
+                        check_type(arg, arg_ty, &mut subst, tcx)?;
+                        return Ok(InferType::Subst(subst, ret_ty));
+                    }
+                    let mut inf_ty = infer_type(arg, tcx)?;
+                    check_subtype(inf_ty.reborrow(), arg_ty, &mut subst, tcx).map_err(
                         |model| SubType {
                             model,
                             exp: arg,
-                            actual: infer_ty_to_ty(actual_arg.reborrow()),
-                            expected: apply_subst(expect_arg, &mut f_subst),
+                            actual: infer_ty_to_ty(inf_ty.reborrow()),
+                            expected: apply_subst(arg_ty, &mut subst),
                         },
                     )?;
-                    Ok(InferType::Subst(f_subst, ret_ty))
+                    match inf_ty {
+                        InferType::Selfify(z3_val, _) => {
+                            let subst = subst.map(|data| {
+                                data.val.insert(id.clone(), z3_val);
+                            });
+                            Ok(InferType::Subst(subst, ret_ty))
+                        }
+                        InferType::Subst(_, Type::Refined(..)) => Err(NotAnf(exp)),
+                        _ => Ok(InferType::Subst(subst, ret_ty)),
+                    }
                 }
             }
         }),
@@ -289,7 +262,7 @@ fn infer_type<'a, 'ctx>(
         }
         Exp::Ascribe(box (exp, ty)) => {
             check_type_well_formed(ty, tcx).map_err(PredIllFormed)?;
-            check_type(exp, ty, tcx)?;
+            check_type(exp, ty, &mut empty_subst(), tcx)?;
             Ok(ty.into())
         }
         _ => Err(CantInfer(exp)),
@@ -306,28 +279,39 @@ fn check_lambda<'a, 'ctx>(
     vars: &'a [Ident],
     body: &'a Exp,
     ty: &'a Type,
+    subst: &mut Subst<'a, 'ctx>,
     tcx: &mut TyCtx<'a, 'ctx>,
 ) -> TCResult<'a, 'ctx, ()> {
     match (vars, ty) {
-        ([], _) => check_type(body, ty, tcx),
+        ([], _) => check_type(body, ty, subst, tcx),
         ([id, rest @ ..], ty @ Type::Fun(box (id2, arg_ty, ret_ty))) => {
             if id == id2 {
-                check_lambda(rest, body, ret_ty, &mut *tcx.insert(id, arg_ty.into()))
+                check_lambda(
+                    rest,
+                    body,
+                    ret_ty,
+                    subst,
+                    &mut *tcx.insert(id, InferType::Subst(subst.clone(), arg_ty)),
+                )
             } else {
                 Err(BinderMismatch(id, ty))
             }
         }
-        ([id, ..], Type::Refined(box (Type::Base(..), _)) | Type::Base(..) | Type::Var(_)) => {
+        (vars @ [id, ..], Type::Var(v)) => match subst.ty.get(v) {
+            Some(InstTy::Ty(ty)) => check_lambda(vars, body, ty, subst, tcx),
+            _ => Err(TrailingParm(id)),
+        },
+        ([id, ..], Type::Refined(box (Type::Base(..), _)) | Type::Base(..)) => {
             Err(TrailingParm(id))
         }
         (vars, Type::Forall(box (id, ty))) => {
             let mut tcx = tcx.insert_tp(id).map_err(|()| ShadowedTypeVar(ty))?;
-            check_lambda(vars, body, ty, &mut *tcx)
+            check_lambda(vars, body, ty, subst, &mut *tcx)
         }
         (vars, rty @ Type::Refined(box (ty, pred))) => {
             tcx.check_pred(&empty_subst(), pred, None)
                 .map_err(|model| CantProve(rty, model))?;
-            check_lambda(vars, body, ty, tcx)
+            check_lambda(vars, body, ty, subst, tcx)
         }
     }
 }
@@ -336,13 +320,14 @@ fn check_let<'a, 'ctx>(
     bindings: &'a [(Ident, Exp)],
     body: &'a Exp,
     ty: &'a Type,
+    subst: &mut Subst<'a, 'ctx>,
     tcx: &mut TyCtx<'a, 'ctx>,
 ) -> TCResult<'a, 'ctx, ()> {
     match bindings {
-        [] => check_type(body, ty, tcx),
+        [] => check_type(body, ty, subst, tcx),
         [(id, exp), rest @ ..] => {
             let bound_ty = infer_type(exp, tcx)?;
-            check_let(rest, body, ty, &mut *tcx.insert(id, bound_ty))
+            check_let(rest, body, ty, subst, &mut *tcx.insert(id, bound_ty))
         }
     }
 }
@@ -364,29 +349,40 @@ fn check_let_rec<'a, 'ctx>(
 fn check_type<'a, 'ctx>(
     exp: &'a Exp,
     ty: &'a Type,
+    subst: &mut Subst<'a, 'ctx>,
     tcx: &mut TyCtx<'a, 'ctx>,
 ) -> TCResult<'a, 'ctx, ()> {
-    vprintln!(tcx, "checking {exp:?} has type {ty:?}");
+    vprintln!(tcx, "checking {exp:?} has type {:?}", (apply_subst(ty, subst)));
     match exp {
-        Exp::Lambda(box vars, box body) => check_lambda(vars, body, ty, tcx),
-        Exp::Let(box bindings, box body) => check_let(bindings, body, ty, tcx),
+        Exp::Lambda(box vars, box body) => check_lambda(vars, body, ty, subst, tcx),
+        Exp::Let(box bindings, box body) => check_let(bindings, body, ty, subst, tcx),
         Exp::Letrec(box bindings, box body) => check_let_rec(bindings, tcx, |tcx| {
             bindings
                 .iter()
-                .try_for_each(|(_, exp, ty)| check_type(exp, ty, tcx))?;
-            check_type(body, ty, tcx)
+                .try_for_each(|(_, exp, ty)| check_type(exp, ty, subst, tcx))?;
+            check_type(body, ty, subst, tcx)
         }),
         Exp::If(box [i, t, e]) => match infer_type(i, tcx)? {
             InferType::Selfify(z3_val, BaseType::Bool) => {
-                check_type(t, ty, &mut *tcx.add_assumption(z3_val.as_bool().unwrap()))?;
-                check_type(e, ty, &mut *tcx.add_assumption(!z3_val.as_bool().unwrap()))
+                check_type(
+                    t,
+                    ty,
+                    subst,
+                    &mut *tcx.add_assumption(z3_val.as_bool().unwrap()),
+                )?;
+                check_type(
+                    e,
+                    ty,
+                    subst,
+                    &mut *tcx.add_assumption(!z3_val.as_bool().unwrap()),
+                )
             }
             InferType::Selfify(z3_val, ty) => Err(NotBool(z3_ast_to_type(&z3_val, ty), exp)),
             _ => Err(NotAnf(exp)),
         },
         _ => {
             let mut inf_ty = infer_type(exp, tcx)?;
-            check_subtype(inf_ty.reborrow(), ty, &mut empty_subst(), tcx).map_err(|model| SubType {
+            check_subtype(inf_ty.reborrow(), ty, subst, tcx).map_err(|model| SubType {
                 actual: infer_ty_to_ty(inf_ty.reborrow()),
                 expected: ty.clone(),
                 exp,
@@ -394,7 +390,7 @@ fn check_type<'a, 'ctx>(
             })
         }
     }?;
-    vprintln!(tcx, "checked {exp:?} had type {ty:?}");
+    vprintln!(tcx, "checked {exp:?} had type {:?}", (apply_subst(ty, subst)));
     Ok(())
 }
 
