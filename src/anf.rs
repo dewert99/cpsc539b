@@ -54,13 +54,16 @@ fn subst_pred(pred: &mut Predicate, var_map: &impl Fn(&Ident) -> Predicate) {
 
 pub fn subst_ty(ty: &mut Type, var_map: &impl Fn(&Ident) -> Predicate) {
     match ty {
-        Type::Refined(_, box pred) => subst_pred(pred, var_map),
+        Type::Refined(box (ty, pred)) => {
+            subst_ty(ty, var_map);
+            subst_pred(pred, var_map)
+        }
         Type::Fun(box (_, arg_ty, res_ty)) => {
             subst_ty(arg_ty, var_map);
             subst_ty(res_ty, var_map);
         }
         Type::Forall(box (_, ty)) => subst_ty(ty, var_map),
-        Type::Var(_) => {}
+        Type::Var(_) | Type::Base(_) => {}
     }
 }
 
@@ -84,15 +87,34 @@ fn anf_translate_bindings(
             }
         }
         Exp::Lambda(_, box exp) => anf_translate_h(exp, var_map),
-        Exp::Inst(box exp, box tys) => {
-            anf_translate_bindings(exp, var_map, bindings, fresh);
-            tys.iter_mut().for_each(|ty| anf_translate_ty(ty, var_map))
-        }
-        Exp::App(box args) => {
-            for arg in args {
-                anf_translate_bindings(arg, var_map, bindings, fresh);
-                lift_to_let(bindings, fresh, arg);
+        Exp::Inst(..) => {
+            let Exp::Inst(box mut curr, tys) = mem::take(exp) else {
+                unreachable!()
+            };
+            let tys = Vec::from(tys).into_iter();
+            anf_translate_bindings(&mut curr, var_map, bindings, fresh);
+            lift_to_let(bindings, fresh, &mut curr);
+            for ty in tys {
+                lift_to_let(bindings, fresh, &mut curr);
+                curr = Exp::Inst(Box::new(curr), Box::new([ty]))
             }
+            *exp = curr
+        }
+        Exp::App(box []) => {}
+        Exp::App(_) => {
+            let Exp::App(args) = mem::take(exp) else {
+                unreachable!()
+            };
+            let mut args = Vec::from(args).into_iter();
+            let mut curr = args.next().unwrap();
+            anf_translate_bindings(&mut curr, var_map, bindings, fresh);
+            for mut arg in args {
+                lift_to_let(bindings, fresh, &mut curr);
+                anf_translate_bindings(&mut arg, var_map, bindings, fresh);
+                lift_to_let(bindings, fresh, &mut arg);
+                curr = Exp::App(Box::new([curr, arg]))
+            }
+            *exp = curr
         }
         Exp::Ascribe(box (exp, ty)) => {
             anf_translate_ty(ty, &*var_map);

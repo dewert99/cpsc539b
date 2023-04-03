@@ -1,6 +1,4 @@
-use crate::ctxt::{
-    convert_pred, empty_subst, vprintln, BInferType, InferType, InstTy, Subst, Tenv, TyCtx,
-};
+use crate::ctxt::{empty_subst, vprintln, BInferType, InferType, InstTy, Subst, Tenv, TyCtx};
 use crate::defs::{BaseType, Exp, Ident, Lit, Predicate, PrimOp, Type};
 use crate::error_reporting::{apply_subst, infer_ty_to_ty, z3_ast_to_type};
 use crate::ty_check::TypeError::*;
@@ -27,6 +25,7 @@ pub enum TypeError<'a, 'ctx> {
     BadApp(&'a Exp),
     ShadowedTypeVar(&'a Type),
     TrailingInst(&'a Type),
+    CantProve(&'a Type, Model<'ctx>),
 }
 
 type PredTy = BaseType;
@@ -40,10 +39,10 @@ fn lit_kind(l: &Lit) -> &'static BaseType {
     }
 }
 
-fn infer_pred_ty(pred: &Predicate, tenv: &Tenv, res_ty: &BaseType) -> Result<PredTy, ()> {
+fn infer_pred_ty(pred: &Predicate, tenv: &Tenv, res_ty: Option<&BaseType>) -> Result<PredTy, ()> {
     let recur = |pred| infer_pred_ty(pred, tenv, res_ty);
     match pred {
-        Predicate::Res => Ok(res_ty.clone()),
+        Predicate::Res => Ok(res_ty.ok_or(())?.clone()),
         Predicate::Lit(l) => Ok(lit_kind(l).clone()),
         Predicate::Var(id) => match tenv.get(id) {
             Some(InferType::Selfify(_, ty)) => Ok((*ty).clone()),
@@ -72,18 +71,20 @@ fn check_type_well_formed<'a, 'ctx>(
     tcx: &mut TyCtx<'a, 'ctx>,
 ) -> Result<(), &'a Type> {
     match ty {
-        Type::Refined(base, box pred) => match infer_pred_ty(pred, &tcx.tenv, base) {
-            Ok(PredTy::Bool) => Ok(()),
+        Type::Refined(box (Type::Base(base), pred)) => {
+            match infer_pred_ty(pred, &tcx.tenv, Some(base)) {
+                Ok(PredTy::Bool) => Ok(()),
+                _ => Err(ty),
+            }
+        }
+        Type::Refined(box (ty, pred)) => match infer_pred_ty(pred, &tcx.tenv, None) {
+            Ok(PredTy::Bool) => check_type_well_formed(ty, tcx),
             _ => Err(ty),
         },
-        // Dep Fun
-        Type::Fun(box (id, arg_ty @ Type::Refined(base, _), ret_ty)) => {
+        Type::Base(_) => Ok(()),
+        Type::Fun(box (id, arg_ty, ret_ty)) => {
             check_type_well_formed(arg_ty, tcx)?;
-            let dummy_ty = InferType::Selfify(tcx.fresh_const(&base, "dummy"), &base);
-            check_type_well_formed(ret_ty, &mut *tcx.insert(id, dummy_ty))
-        }
-        Type::Fun(box (_, arg_ty, ret_ty)) => {
-            check_type_well_formed(arg_ty, tcx)?;
+            let tcx = &mut *tcx.insert(id, arg_ty.into());
             check_type_well_formed(ret_ty, tcx)
         }
         Type::Forall(box (id, ty2)) => {
@@ -141,14 +142,25 @@ fn check_subtype<'a, 'ctx>(
                 Err(None)
             }
         }
-        (InferType::Selfify(actual, actual_base), InstTy::Ty(Type::Refined(base, box pred))) => {
+        (
+            InferType::Selfify(actual, actual_base),
+            InstTy::Ty(Type::Refined(box (Type::Base(base), pred))),
+        ) => {
             if actual_base != base {
                 Err(None)
             } else {
-                let pre_cond_check = convert_pred(&expect_s, tcx, pred, &actual)
-                    .as_bool()
-                    .unwrap();
-                tcx.check(pre_cond_check).map_err(Some)
+                tcx.check_pred(&expect_s, pred, Some(&actual)).map_err(Some)
+            }
+        }
+        (actual, InstTy::Ty(Type::Refined(box (expect, pred)))) => {
+            tcx.check_pred(expect_s, pred, None).map_err(Some)?;
+            check_subtype(actual, expect, expect_s, tcx)
+        }
+        (InferType::Selfify(_, actual_base), InstTy::Ty(Type::Base(base))) => {
+            if actual_base != base {
+                Err(None)
+            } else {
+                Ok(())
             }
         }
         (
@@ -217,11 +229,12 @@ fn infer_type<'a, 'ctx>(
         Exp::App(box [f, args @ ..]) => args.iter().fold(infer_type(f, tcx), |f_ty, arg| {
             match (f_ty?, infer_type(arg, tcx)?) {
                 (
-                    InferType::Subst(_, Type::Refined(..) | Type::Var(..))
+                    InferType::Subst(_, Type::Var(..) | Type::Base(..))
                     | InferType::Selfify(..)
                     | InferType::Fresh(..),
                     _,
                 ) => Err(TrailingArg(exp)),
+                (InferType::Subst(_, Type::Refined(..)), _) => Err(NotAnf(exp)),
                 (InferType::Subst(mut s, f @ Type::Forall(..)), _) => {
                     Err(CanApplyForallTo(exp, apply_subst(f, &mut s)))
                 }
@@ -270,6 +283,7 @@ fn infer_type<'a, 'ctx>(
                         });
                         Ok(InferType::Subst(subst, base_ty))
                     }
+                    InferType::Subst(_, Type::Refined(..)) => Err(NotAnf(exp)),
                     _ => Err(TrailingInst(ty)),
                 })
         }
@@ -303,10 +317,17 @@ fn check_lambda<'a, 'ctx>(
                 Err(BinderMismatch(id, ty))
             }
         }
-        ([id, ..], Type::Refined(..) | Type::Var(_)) => Err(TrailingParm(id)),
+        ([id, ..], Type::Refined(box (Type::Base(..), _)) | Type::Base(..) | Type::Var(_)) => {
+            Err(TrailingParm(id))
+        }
         (vars, Type::Forall(box (id, ty))) => {
             let mut tcx = tcx.insert_tp(id).map_err(|()| ShadowedTypeVar(ty))?;
             check_lambda(vars, body, ty, &mut *tcx)
+        }
+        (vars, rty @ Type::Refined(box (ty, pred))) => {
+            tcx.check_pred(&empty_subst(), pred, None)
+                .map_err(|model| CantProve(rty, model))?;
+            check_lambda(vars, body, ty, tcx)
         }
     }
 }

@@ -141,12 +141,12 @@ pub fn convert_pred<'ctx>(
     subst: &Subst<'_, 'ctx>,
     tcx: &TyCtx<'_, 'ctx>,
     pred: &Predicate,
-    rsub: &ast::Dynamic<'ctx>,
+    rsub: Option<&ast::Dynamic<'ctx>>,
 ) -> ast::Dynamic<'ctx> {
     let convert = |pred| convert_pred(subst, tcx, pred, rsub);
     let ctx = tcx.ctx();
     match pred {
-        Predicate::Res => rsub.clone(),
+        Predicate::Res => rsub.unwrap().clone(),
         Predicate::Var(x) => subst
             .val
             .get(x)
@@ -181,22 +181,32 @@ fn resolve_s<'a, 'ctx, S: AsRef<Subst<'a, 'ctx>> + AsMut<Subst<'a, 'ctx>>>(
     subst: S,
     tcx: &TyCtx<'a, 'ctx>,
     id: &Ident,
+    rsf: ast::Bool<'ctx>,
 ) -> (InferType<'a, 'ctx, S>, ast::Bool<'ctx>) {
-    let z3_true = ast::Bool::from_bool(tcx.ctx(), true);
     match ty {
         Type::Var(tid) => match subst.as_ref().ty.get(tid) {
-            None => (InferType::Subst(subst, ty), z3_true),
-            Some(InstTy::Fresh(id)) => (InferType::Fresh(*id), z3_true),
-            Some(InstTy::Ty(ty)) => resolve_s(ty, subst, tcx, id),
+            None => (InferType::Subst(subst, ty), rsf),
+            Some(InstTy::Fresh(id)) => (InferType::Fresh(*id), rsf),
+            Some(InstTy::Ty(ty)) => resolve_s(ty, subst, tcx, id, rsf),
         },
-        Type::Refined(b_ty, box r) => {
+        Type::Refined(box (Type::Base(b_ty), r)) => {
             let z3_const = tcx.fresh_const(b_ty, id.as_str());
-            let z3_pred = convert_pred(subst.as_ref(), tcx, r, &z3_const)
+            let z3_pred = convert_pred(subst.as_ref(), tcx, r, Some(&z3_const))
                 .as_bool()
                 .unwrap();
-            (InferType::Selfify(z3_const, b_ty), z3_pred)
+            (InferType::Selfify(z3_const, b_ty), rsf & z3_pred)
         }
-        _ => (InferType::Subst(subst, ty), z3_true),
+        Type::Refined(box (ty, r)) => {
+            let z3_pred = convert_pred(subst.as_ref(), tcx, r, None)
+                .as_bool()
+                .unwrap();
+            resolve_s(ty, subst, tcx, id, rsf & z3_pred)
+        }
+        Type::Base(b_ty) => {
+            let z3_const = tcx.fresh_const(b_ty, id.as_str());
+            (InferType::Selfify(z3_const, b_ty), rsf)
+        }
+        _ => (InferType::Subst(subst, ty), rsf),
     }
 }
 
@@ -205,11 +215,17 @@ fn resolve<'a, 'ctx, S: AsRef<Subst<'a, 'ctx>> + AsMut<Subst<'a, 'ctx>>>(
     tcx: &TyCtx<'a, 'ctx>,
     id: &Ident,
 ) -> (InferType<'a, 'ctx, S>, ast::Bool<'ctx>) {
+    let z3_true = ast::Bool::from_bool(tcx.ctx(), true);
     let (mut res0, res1) = match ty {
-        InferType::Subst(subst, ty) => resolve_s(ty, subst, tcx, id),
-        _ => (ty, ast::Bool::from_bool(tcx.ctx(), true)),
+        InferType::Subst(subst, ty) => resolve_s(ty, subst, tcx, id, z3_true),
+        _ => (ty, z3_true),
     };
-    vprintln!(tcx, "^~ resolved to {:?}, {:?}", (infer_ty_to_ty(res0.reborrow())), res1);
+    vprintln!(
+        tcx,
+        "^~ resolved to {:?}, {:?}",
+        (infer_ty_to_ty(res0.reborrow())),
+        res1
+    );
     (res0, res1)
 }
 
@@ -258,10 +274,10 @@ impl<'a, 'ctx> TyCtx<'a, 'ctx> {
         vprintln!(
             self,
             "_: {:?}",
-            (Type::Refined(
-                BaseType::Int,
-                Box::new(z3_ast_to_pred(&assume.clone().into()))
-            ))
+            (Type::Refined(Box::new((
+                Type::Base(BaseType::Int),
+                z3_ast_to_pred(&assume.clone().into())
+            ))))
         );
         self.do_and_revert((add_assumption_dr(assume), tab_dr()))
     }
@@ -330,6 +346,16 @@ impl<'a, 'ctx> TyCtx<'a, 'ctx> {
             SatResult::Unsat => Ok(()),
             _ => Err(self.solver.get_model().unwrap()),
         }
+    }
+
+    pub fn check_pred(
+        &self,
+        subst: &Subst<'_, 'ctx>,
+        pred: &Predicate,
+        rsub: Option<&ast::Dynamic<'ctx>>,
+    ) -> Result<(), Model<'ctx>> {
+        let pred = convert_pred(subst, self, pred, rsub).as_bool().unwrap();
+        self.check(pred)
     }
 }
 

@@ -61,7 +61,7 @@ pub enum BaseType {
 pub enum Type {
     #[serde(alias = ":")]
     #[serde(rename(serialize = ":"))]
-    Refined(BaseType, Box<Predicate>), // The value variable is always Res
+    Refined(Box<(Type, Predicate)>), // The value variable is always Res
     #[serde(alias = "->")]
     #[serde(rename(serialize = "->"))]
     Fun(Box<(Ident, Type, Type)>),
@@ -70,6 +70,8 @@ pub enum Type {
     Forall(Box<(Ident, Type)>),
     #[serde(untagged)]
     Var(Ident),
+    #[serde(untagged)]
+    Base(BaseType),
 }
 
 pub use Type::*;

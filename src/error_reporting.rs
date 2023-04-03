@@ -53,9 +53,10 @@ fn apply_subst_pred(pred: &Predicate, subst: &Subst) -> Predicate {
 
 pub fn apply_subst(ty: &Type, subst: &mut Subst) -> Type {
     match ty {
-        Type::Refined(base, box pred) => {
-            Type::Refined(base.clone(), Box::new(apply_subst_pred(pred, subst)))
-        }
+        Type::Refined(box (ty, pred)) => Type::Refined(Box::new((
+            apply_subst(ty, subst),
+            apply_subst_pred(pred, subst),
+        ))),
         Type::Fun(box (id, arg_ty, ret_ty)) => {
             let subst = &mut *subst.remove_v(id.clone());
             Type::Fun(Box::new((
@@ -73,13 +74,14 @@ pub fn apply_subst(ty: &Type, subst: &mut Subst) -> Type {
             Some(InstTy::Fresh(id)) => Type::Var(format!("$T{id}").into()),
             Some(InstTy::Ty(ty)) => apply_subst(*ty, subst),
         },
+        Type::Base(b) => Type::Base(b.clone()),
     }
 }
 
 pub fn z3_ast_to_type(z3_ast: &ast::Dynamic, base: &BaseType) -> Type {
     let pred = z3_ast_to_pred(z3_ast);
     let pred = Predicate::Op(Box::new((PrimOp::Eq, Predicate::Res, pred)));
-    Type::Refined(base.clone(), Box::new(pred))
+    Type::Refined(Box::new((Type::Base(base.clone()), pred)))
 }
 
 pub fn infer_ty_to_ty(ty: BInferType<'_, '_, '_>) -> Type {

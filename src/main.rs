@@ -88,6 +88,20 @@ test_ty_check!(test_bind_inst,
               ("one" ((inst "id" ((: int (= res 1)))) 1)))
           "one") (: int (= res 1))));
 
+test_ty_check!(test_sum, (as (λ ("b" "l" "r") (if "b" (λ ("f" "g") ("f" "l")) (λ ("f" "g") ("g" "r"))))
+ (forall "X" (forall "Y" (-> "b" bool (-> "l" "X" (-> "r" "Y" (forall "Z" (-> "f" (-> "x" (: "X" "b") "Z") (-> "g" (-> "y" (: "Y" (! "b")) "Z") "Z"))))))))));
+
+test_ty_check!(test_sum2, (as (let (
+    ("mk_sum" (as (λ ("b" "l" "r" "f" "g") (if "b" ("f" "l") ("g" "r")))
+        (forall "X" (forall "Y" (-> "b" bool (-> "l" "X" (-> "r" "Y" (forall "Z" (-> "f" (-> "x" (: "X" "b") "Z") (-> "g" (-> "y" (: "Y" (! "b")) "Z") "Z"))))))))))
+    ("mk_sum_i" (inst "mk_sum" ((-> "x" int (: int (= res (+ "x" 1)))) (-> "x" int (: int (= res (sub 0 "x")))))))
+    ("s1" ("mk_sum_i" #t ("add" 1) ("sub" 0)))
+    ("s2" ("mk_sum_i" #f ("add" 1) ("sub" 0)))
+    ("h" (as (λ ("l") ("l" 5)) (-> "l" (-> "x" int (: int (= res (+ "x" 1)))) (: int (= res 6)))))
+    ("r1" ((inst "s1" ((: int (= res 6)))) "h" "h"))
+    ("r2" ((inst "s2" ((: int (= res -5)))) (as (λ ("l") 10) (-> "l" (: (-> "x" int int) #f) (: int (= res (sub 0 5))))) (as (λ ("l") ("l" 5)) (-> "l" (-> "x" int (: int (= res (sub 0 "x")))) (: int (= res (sub 0 5)))))))
+) ("add" "r1" "r2")) (: int (= res 1))));
+
 // #[test]
 // fn debug() {
 //     let mut exp = exp!( (as (λ ("x" "y") "x") (forall "X" (-> "x" "X" (forall "X" (-> "y" "X" "X"))))) );
