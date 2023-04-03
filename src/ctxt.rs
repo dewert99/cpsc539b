@@ -5,7 +5,6 @@ use crate::util::{
     do_revert, inc_dr, map_insert_dr, map_remove_dr, shift, DoRevert, SemiPersistent,
 };
 use ahash::AHashMap;
-use lazy_static::lazy_static;
 use std::fmt::Debug;
 use std::ops::{Add, BitAnd, BitOr, DerefMut, Sub};
 use z3::ast::Ast;
@@ -359,25 +358,15 @@ impl<'a, 'ctx> TyCtx<'a, 'ctx> {
     }
 }
 
-lazy_static! {
-    static ref ADD_TY: Type =
-        ty!((-> "x" (: int #t) (fun "y" (: int #t) (: int (= res (+ "x" "y"))))));
-    static ref SUB_TY: Type =
-        ty!((-> "x" (: int #t) (fun "y" (: int #t) (: int (= res (sub "x" "y"))))));
-    static ref LE_TY: Type =
-        ty!((-> "x" (: int #t) (fun "y" (: int #t) (: bool (= res (<= "x" "y"))))));
-    static ref EQ_TY: Type =
-        ty!((-> "x" (: int #t) (fun "y" (: int #t) (: bool (= res (= "x" "y"))))));
-    static ref ASSERT_TY: Type = ty!((-> "x" (: bool res) (: bool res)));
-}
+pub type PreTenv = AHashMap<Ident, Type>;
 
-pub fn make_tenv() -> Tenv<'static, 'static> {
+pub fn base_tenv() -> PreTenv {
     AHashMap::from([
-        ("add".into(), (&*ADD_TY).into()),
-        ("sub".into(), (&*SUB_TY).into()),
-        ("le".into(), (&*LE_TY).into()),
-        ("eq".into(), (&*EQ_TY).into()),
-        ("assert".into(), (&*ASSERT_TY).into()),
+        ("add".into(), ty!((-> "x" (: int #t) (fun "y" (: int #t) (: int (= res (+ "x" "y"))))))),
+        ("sub".into(), ty!((-> "x" (: int #t) (fun "y" (: int #t) (: int (= res (sub "x" "y"))))))),
+        ("le".into(), ty!((-> "x" (: int #t) (fun "y" (: int #t) (: bool (= res (<= "x" "y"))))))),
+        ("eq".into(),  ty!((-> "x" (: int #t) (fun "y" (: int #t) (: bool (= res (= "x" "y"))))))),
+        ("assert".into(), ty!((-> "x" (: bool res) (: bool res)))),
     ])
 }
 
@@ -387,9 +376,9 @@ pub fn make_context() -> Context {
     Context::new(&config)
 }
 
-pub fn make_tcx<'ctx>(context: &'ctx Context, verbose: bool) -> TyCtx<'static, 'ctx> {
+pub fn make_tcx<'a, 'ctx>(context: &'ctx Context, tenv: &'a PreTenv, verbose: bool) -> TyCtx<'a, 'ctx> {
     let solver = Solver::new(&context);
-    let tenv = make_tenv();
+    let tenv = tenv.iter().map(|(k, v)| (k.clone(), v.into())).collect();
     TyCtx::new(TyCtxBase {
         solver,
         tenv,

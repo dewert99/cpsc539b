@@ -8,9 +8,8 @@ mod error_reporting;
 mod ty_check;
 mod util;
 
-use crate::ctxt::{make_context, make_tcx};
+use crate::ctxt::{base_tenv, make_context, make_tcx};
 use defs::Exp;
-use std::assert_matches::assert_matches;
 use std::io::stdin;
 use defs::Command::*;
 use crate::anf::anf_translate;
@@ -20,10 +19,13 @@ macro_rules! test_ty_check_result {
     ($name:ident, $t:tt, $expect:pat) => {
         #[test]
         fn $name() {
+            use ty_check::TypeError::*;
+            use std::assert_matches::assert_matches;
             let mut exp = exp!($t);
             anf::anf_translate(&mut exp);
             let ctx = make_context();
-            let mut tcx = make_tcx(&ctx, true);
+            let tenv = base_tenv();
+            let mut tcx = make_tcx(&ctx, &tenv, true);
             let res = dbg!(ty_check::type_check(dbg!(&exp), &mut tcx));
             assert_matches!(res, $expect)
         }
@@ -128,14 +130,20 @@ fn main() {
     let mut buf = String::new();
     let mut exp = Exp::default();
     let context = make_context();
-    let tyctx = |v| make_tcx(&context, v);
+    let mut tenv = base_tenv();
     loop {
         println!("{exp:?}");
         // std::io::stdin().read_line(&mut buf).unwrap_or_default();
         match lexpr::Parser::from_reader(stdin()).expect_value() {
             Ok(v) => match serde_lexpr::from_value(&v) {
-                Ok(Check) => eprintln!("{:?}", type_check(&exp, &mut tyctx(false))),
-                Ok(VCheck) => eprintln!("{:?}", type_check(&exp, &mut tyctx(true))),
+                Ok(Check) => {
+                    let mut tcx = make_tcx(&context, &tenv, false);
+                    eprintln!("{:?}", type_check(&exp, &mut tcx))
+                },
+                Ok(VCheck) => {
+                    let mut tcx = make_tcx(&context, &tenv, true);
+                    eprintln!("{:?}", type_check(&exp, &mut tcx))
+                },
                 Ok(ANF) => anf_translate(&mut exp),
                 Ok(Exp(new_exp)) => exp = new_exp,
                 Err(err) => eprintln!("{err}")

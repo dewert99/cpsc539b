@@ -18,5 +18,4 @@ smallstr = {features = ["serde", "union"], version = "*"}
 serde-lexpr = "*"
 lexpr = "*"
 z3 = {features = ["static-link-z3"], version = "0.11.2"}
-lazy_static = "1.4.0"
 serde_json = "*"
