@@ -8,19 +8,20 @@ mod error_reporting;
 mod ty_check;
 mod util;
 
-use crate::ctxt::{base_tenv, make_context, make_tcx};
-use defs::Exp;
-use std::io::stdin;
-use defs::Command::*;
 use crate::anf::anf_translate;
+use crate::ctxt::{base_tenv, make_context, make_tcx};
 use crate::ty_check::type_check;
+use defs::Command::*;
+use defs::Exp;
+use std::collections::hash_map::Entry;
+use std::io::stdin;
 
 macro_rules! test_ty_check_result {
     ($name:ident, $t:tt, $expect:pat) => {
         #[test]
         fn $name() {
-            use ty_check::TypeError::*;
             use std::assert_matches::assert_matches;
+            use ty_check::TypeError::*;
             let mut exp = exp!($t);
             anf::anf_translate(&mut exp);
             let ctx = make_context();
@@ -139,16 +140,30 @@ fn main() {
                 Ok(Check) => {
                     let mut tcx = make_tcx(&context, &tenv, false);
                     eprintln!("{:?}", type_check(&exp, &mut tcx))
-                },
+                }
                 Ok(VCheck) => {
                     let mut tcx = make_tcx(&context, &tenv, true);
                     eprintln!("{:?}", type_check(&exp, &mut tcx))
-                },
+                }
+                Ok(Define(box (id, mut exp))) => {
+                    anf_translate(&mut exp);
+                    let mut tcx = make_tcx(&context, &tenv, false);
+                    match type_check(&exp, &mut tcx) {
+                        Ok(ty) => match tenv.entry(id) {
+                            Entry::Occupied(..) => eprintln!("can't redefine existing definition"),
+                            Entry::Vacant(v) => {
+                                eprintln!("{id:?}: {ty:?}");
+                                v.insert(ty);
+                            }
+                        },
+                        Err(err) => eprintln!("{:?}", err),
+                    }
+                }
                 Ok(ANF) => anf_translate(&mut exp),
                 Ok(Exp(new_exp)) => exp = new_exp,
-                Err(err) => eprintln!("{err}")
-            }
-            Err(err) =>  eprintln!("{err}")
+                Err(err) => eprintln!("{err}"),
+            },
+            Err(err) => eprintln!("{err}"),
         }
         buf.clear()
     }

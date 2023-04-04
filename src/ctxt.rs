@@ -210,10 +210,11 @@ fn resolve_s<'a, 'ctx, S: AsRef<Subst<'a, 'ctx>> + AsMut<Subst<'a, 'ctx>>>(
 }
 
 fn resolve<'a, 'ctx, S: AsRef<Subst<'a, 'ctx>> + AsMut<Subst<'a, 'ctx>>>(
-    ty: InferType<'a, 'ctx, S>,
+    mut ty: InferType<'a, 'ctx, S>,
     tcx: &TyCtx<'a, 'ctx>,
     id: &Ident,
 ) -> (InferType<'a, 'ctx, S>, ast::Bool<'ctx>) {
+    vprintln!(tcx, "{id:?}: {:?}", (infer_ty_to_ty(ty.reborrow())));
     let z3_true = ast::Bool::from_bool(tcx.ctx(), true);
     let (mut res0, res1) = match ty {
         InferType::Subst(subst, ty) => resolve_s(ty, subst, tcx, id, z3_true),
@@ -284,9 +285,8 @@ impl<'a, 'ctx> TyCtx<'a, 'ctx> {
     pub fn insert<'b>(
         &'b mut self,
         id: &'b Ident,
-        mut ty: InferType<'a, 'ctx>,
+        ty: InferType<'a, 'ctx>,
     ) -> impl DerefMut<Target = TyCtx<'a, 'ctx>> + 'b {
-        vprintln!(self, "{id:?}: {:?}", (infer_ty_to_ty(ty.reborrow())));
         let (ty, z3_pred) = resolve(ty, self, id);
         self.do_and_revert((
             (tab_dr(), add_assumption_dr(z3_pred)),
@@ -297,12 +297,11 @@ impl<'a, 'ctx> TyCtx<'a, 'ctx> {
     pub fn insert_dummy<'b, 'c>(
         &'b mut self,
         id: &Ident,
-        mut ty: BInferType<'a, 'ctx, 'c>,
+        ty: BInferType<'a, 'ctx, 'c>,
     ) -> (
         BInferType<'a, 'ctx, 'c>,
         impl DerefMut<Target = TyCtx<'a, 'ctx>> + 'b,
     ) {
-        vprintln!(self, "{id:?}: {:?}", (infer_ty_to_ty(ty.reborrow())));
         let (ty, z3_pred) = resolve(ty, self, id);
         (
             ty,
@@ -362,10 +361,22 @@ pub type PreTenv = AHashMap<Ident, Type>;
 
 pub fn base_tenv() -> PreTenv {
     AHashMap::from([
-        ("add".into(), ty!((-> "x" (: int #t) (fun "y" (: int #t) (: int (= res (+ "x" "y"))))))),
-        ("sub".into(), ty!((-> "x" (: int #t) (fun "y" (: int #t) (: int (= res (sub "x" "y"))))))),
-        ("le".into(), ty!((-> "x" (: int #t) (fun "y" (: int #t) (: bool (= res (<= "x" "y"))))))),
-        ("eq".into(),  ty!((-> "x" (: int #t) (fun "y" (: int #t) (: bool (= res (= "x" "y"))))))),
+        (
+            "add".into(),
+            ty!((-> "x" (: int #t) (fun "y" (: int #t) (: int (= res (+ "x" "y")))))),
+        ),
+        (
+            "sub".into(),
+            ty!((-> "x" (: int #t) (fun "y" (: int #t) (: int (= res (sub "x" "y")))))),
+        ),
+        (
+            "le".into(),
+            ty!((-> "x" (: int #t) (fun "y" (: int #t) (: bool (= res (<= "x" "y")))))),
+        ),
+        (
+            "eq".into(),
+            ty!((-> "x" (: int #t) (fun "y" (: int #t) (: bool (= res (= "x" "y")))))),
+        ),
         ("assert".into(), ty!((-> "x" (: bool res) (: bool res)))),
     ])
 }
@@ -376,15 +387,26 @@ pub fn make_context() -> Context {
     Context::new(&config)
 }
 
-pub fn make_tcx<'a, 'ctx>(context: &'ctx Context, tenv: &'a PreTenv, verbose: bool) -> TyCtx<'a, 'ctx> {
+pub fn make_tcx<'a, 'ctx>(
+    context: &'ctx Context,
+    tenv: &'a PreTenv,
+    verbose: bool,
+) -> TyCtx<'a, 'ctx> {
     let solver = Solver::new(&context);
-    let tenv = tenv.iter().map(|(k, v)| (k.clone(), v.into())).collect();
-    TyCtx::new(TyCtxBase {
+    let mut tcx = TyCtx::new(TyCtxBase {
         solver,
-        tenv,
+        tenv: AHashMap::default(),
         tpenv: AHashMap::default(),
         fresh_count: 0,
         tab_count: 0,
         verbose,
-    })
+    });
+    for (id, ty) in tenv {
+        let (ty, assumption) = resolve(ty.into(), &tcx, id);
+        tcx = tcx.map(|tcx| {
+            tcx.assert(&assumption);
+            tcx.tenv.insert(id.clone(), ty.into());
+        });
+    }
+    tcx
 }

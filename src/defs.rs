@@ -127,6 +127,8 @@ pub enum Command {
     VCheck,
     #[serde(rename = "anf")]
     ANF,
+    #[serde(rename = "define")]
+    Define(Box<(Ident, Exp)>),
     #[serde(untagged)]
-    Exp(Exp)
+    Exp(Exp),
 }
