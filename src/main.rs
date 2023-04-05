@@ -128,7 +128,6 @@ test_ty_check!(test_sum2b, (as (let (
 // }
 
 fn main() {
-    let mut buf = String::new();
     let mut exp = Exp::default();
     let context = make_context();
     let mut tenv = base_tenv();
@@ -152,7 +151,7 @@ fn main() {
                         Ok(ty) => match tenv.entry(id) {
                             Entry::Occupied(..) => eprintln!("can't redefine existing definition"),
                             Entry::Vacant(v) => {
-                                eprintln!("{id:?}: {ty:?}");
+                                eprintln!("{:?}: {ty:?}", v.key());
                                 v.insert(ty);
                             }
                         },
@@ -165,6 +164,5 @@ fn main() {
             },
             Err(err) => eprintln!("{err}"),
         }
-        buf.clear()
     }
 }
