@@ -1,3 +1,5 @@
+Note: This is a course project for CPSC539B at UBC
+
 The type system is a combination of λβ from the refinement typing paper and system F.  It also supports refining arbitrary types (instead of just base types), but these refinements can't mention the term they refine (only other terms in scope).  There is also an experimental feature that allows lambda terms that appear as the argument of an application to be checked directly instead of being inferred.
 
 The syntax is
@@ -23,4 +25,10 @@ The global context when starting the program is:
 "le": (-> "x" (: int #t) (-> "y" (: int #t) (: bool (= res (<= "x" "y")))))
 "assert": (-> "x" (: bool res) (: bool res))
 "eq": (-> "x" (: int #t) (-> "y" (: int #t) (: bool (= res (= "x" "y")))))
+```
+
+Run with
+```
+docker build .
+docker run -it <name of docker image>
 ```
