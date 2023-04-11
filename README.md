@@ -1,6 +1,6 @@
 Note: This is a course project for CPSC539B at UBC
 
-The type system is a combination of λβ from the refinement typing paper and system F.  It also supports refining arbitrary types (instead of just base types), but these refinements can't mention the term they refine (only other terms in scope).  There is also an experimental feature that allows lambda terms that appear as the argument of an application to be checked directly instead of being inferred.  Terms bound in letrec must have function type to avoid issue discussed in class.
+The type system is a combination of λβ from the refinement typing paper and system F.  It also supports refining arbitrary types (instead of just base types), but these refinements can't mention the term they refine (only other terms in scope).  There is also an experimental feature that allows lambda terms that appear as the argument of an application to be checked directly instead of being inferred.  Terms bound in letrec must have function type to avoid issue discussed in class. It doesn't include a type abstraction term, but infers them when checking against a forall type (in checking mode). It also doesn't support shadowing type variables.
 
 The syntax is
 ```
