@@ -39,4 +39,4 @@ Some example programs can be found in [`main.rs`](src/main.rs)
 * `test_ty_check_result!` is used for programs where type checking should fail.
 
 ### Type System Details
-___.pdf contains the type derivation trees for the type system after running anf. 
+[type_system.pdf](type_system.pdf) contains the type derivation trees for the type system after running anf. 
